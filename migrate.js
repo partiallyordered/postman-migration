@@ -10,6 +10,11 @@
 // - our tests use setTimeout variously- can we move most of that usage to the third parameter in
 //   the `it` test block?
 // - lint-fix?
+// - jest serial mode
+// - postman bundled libraries and "sandbox" API:
+//   https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/
+//   https://github.com/postmanlabs/postman-sandbox
+//   https://github.com/postmanlabs/postman-runtime
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
@@ -67,8 +72,10 @@ const createOrReplaceOutputDir = async (name) => {
     await fs.mkdir(name);
 };
 
+// Take the pre-request code, the request, and the post-request scripts (generally tests and
+// assertions, but sometimes environment setting etc.)
 const transformToTest = ({ leafItemWithRequest: i }) => {
-    // 
+
 };
 
 recurse({ ...collection, name: 'root' }, '');
