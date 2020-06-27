@@ -14,13 +14,15 @@ const _ = require('./lodash'),
  */
 function makeSnippet (request, indentString, options) {
 
-  var snippet = options.ES6_enabled ? 'const' : 'var',
+  var snippet = '',
     configArray = [],
     dataSnippet = '',
     body,
     headers;
 
-  snippet += ' axios = require(\'axios\');\n';
+  if (options.requireAxiosLib) {
+    snippet +=  (options.ES6_enabled ? 'const' : 'var') + ' axios = require(\'axios\');\n';
+  }
   if (request.body && !request.headers.has('Content-Type')) {
     if (request.body.mode === 'file') {
       request.addHeader({
@@ -118,12 +120,11 @@ function makeSnippet (request, indentString, options) {
     configArray.push(indentString + 'maxRedirects: 0');
   }
   if (dataSnippet !== '') {
-    // although just data is enough, whatever :shrug:
-    configArray.push(indentString + 'data : data');
+    configArray.push(indentString + 'data,');
   }
 
   if (options.ES6_enabled) {
-    snippet += 'let';
+    snippet += 'const';
   }
   else {
     snippet += 'var';
@@ -132,7 +133,7 @@ function makeSnippet (request, indentString, options) {
   snippet += ' config = {\n';
   snippet += configArray.join(',\n') + '\n';
   snippet += '};\n\n';
-  snippet += 'axios(config)\n';
+  snippet += 'const resp = await axios(config)\n';
   if (options.ES6_enabled) {
     snippet += '.then((response) => {\n';
   }
