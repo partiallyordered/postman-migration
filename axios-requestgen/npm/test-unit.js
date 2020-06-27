@@ -9,7 +9,6 @@ var shell = require('shelljs'),
   // set directories and files for test and coverage report
   path = require('path'),
 
-  NYC = require('nyc'),
   chalk = require('chalk'),
   recursive = require('recursive-readdir'),
 
@@ -23,17 +22,8 @@ module.exports = function (exit) {
   shell.test('-d', COV_REPORT_PATH) && shell.rm('-rf', COV_REPORT_PATH);
   shell.mkdir('-p', COV_REPORT_PATH);
 
-  var Mocha = require('mocha'),
-    nyc = new NYC({
-      reportDir: COV_REPORT_PATH,
-      tempDirectory: COV_REPORT_PATH,
-      reporter: ['text', 'lcov', 'text-summary'],
-      exclude: ['config', 'test'],
-      hookRunInContext: true,
-      hookRunInThisContext: true,
-    });
+  var Mocha = require('mocha');
 
-  nyc.wrap();
   // add all spec files to mocha
   recursive(SPEC_SOURCE_DIR, function (err, files) {
     if (err) { console.error(err); return exit(1); }
@@ -47,9 +37,6 @@ module.exports = function (exit) {
     mocha.run(function (runError) {
       runError && console.error(runError.stack || runError);
 
-      nyc.reset();
-      nyc.writeCoverageFile();
-      nyc.report();
       exit(runError ? 1 : 0);
     });
   });
