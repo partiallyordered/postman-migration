@@ -19,13 +19,15 @@
 //   https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/
 //   https://github.com/postmanlabs/postman-sandbox
 //   https://github.com/postmanlabs/postman-runtime
+// - replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
+// - replace all usage of eval..
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
 const pp = (...args) => console.log(util.inspect(...args, { depth: Infinity, colors: true }));
 const fs = require('fs').promises;
 const sdk = require('postman-collection');
-const { promisify } = require('util');
+const generateTestFile = require('./generateTestFile');
 
 const requestCodeGen = require('./axios-requestgen');
 const convertRequest = async (req) => {
@@ -37,7 +39,7 @@ const convertRequest = async (req) => {
         requireAxiosLib: false,
         // requestTimeout: 2000,
     };
-    return promisify(requestCodeGen.convert)(pmRequest, opts);
+    return util.promisify(requestCodeGen.convert)(pmRequest, opts);
 };
 
 const items = {
@@ -54,25 +56,45 @@ const events = {
     types: new Set(),
 };
 
+const types = {
+    folder: 'folder',
+    request: 'request,'
+};
+
 const recurse = (item, path) => {
+    // TODO: is this still used?
     if (item.event) {
         item.event.forEach(ev => {
             events.listen.add(ev.listen);
             events.types.add(ev.script.type)
-        })
+        });
     }
     items.all.push({ item, path });
     if (!item.request && !item.item) {
-        items.leafWithoutRequests.push({ item, path });
+        // https://schema.getpostman.com/collection/json/v2.1.0/draft-07/docs/index.html
+        throw new Error('Impossible item type with no request and no child');
+        // items.leafWithoutRequests.push({ data: item, path });
     }
     else if (item.item && item.request) {
-        items.nonLeafWithRequest.push({ item, path });
+        // https://schema.getpostman.com/collection/json/v2.1.0/draft-07/docs/index.html
+        throw new Error('Impossible item type with a request and children');
+        // items.nonLeafWithRequest.push({ data: item, path });
     }
     else if (item.request && !item.item) {
-        items.leafWithRequest.push({ item, path });
+        items.leafWithRequest.push({ type: types.request, data: item, path });
     }
     else if (!item.request && item.item) {
-        items.nonLeafWithoutRequest.push({ item, path });
+        items.nonLeafWithoutRequest.push({ type: types.folder, data: item, path });
+        if (item.event && item.event.some(ev => ev.script.exec.find(line => line !== ''))) {
+            // TODO: handle these scenarios
+            // At the time of writing this comment, it's likely the collection tree will be
+            // representated as a tree of _Folder_/_Request_. When transforming this tree to tests,
+            // it's likely a _Folder_ will transform to a `describe` block, and a _Request_ will
+            // transform to a `it` block.
+            // Therefore, handling the situation where a _Folder_ contains before/after scripts
+            // will amount to producing that code as `.beforeAll` and `.afterAll` functions.
+            throw new Error('Unhandled folder type with pre-request or test script');
+        }
     }
     if (item.item) {
         item.item.forEach(i => recurse(i, `${path}.${item.name}`));
@@ -86,7 +108,7 @@ const createOrReplaceOutputDir = async (name) => {
 
 // Take the pre-request code, the request, and the post-request scripts (generally tests and
 // assertions, but sometimes environment setting etc.)
-const transformToTest = async ({ item: i }) => {
+const transformToTest = async ({ data: d }) => {
     // TODO:
     // - replace variables i.e. '{{HOST_CENTRAL_LEDGER}}' in requests with references to
     //   `pm.environment` or `pm.variables` or whatever's appropriate.
@@ -94,13 +116,13 @@ const transformToTest = async ({ item: i }) => {
     // - hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
 
     // Utilities
-    const getEventScriptByType = (evType) => i.event.find(ev => ev.listen === evType).script.exec.join('\n');
+    const getEventScriptByType = (evType) => d.event.find(ev => ev.listen === evType).script.exec.join('\n');
 
     // "pre-request scripts"
     const preRequest = getEventScriptByType('prerequest');
 
     // request
-    const req = await convertRequest(i.request);
+    const req = await convertRequest(d.request);
 
     // "tests"
     const test = getEventScriptByType('test');
@@ -114,7 +136,7 @@ recurse({ ...collection, name: 'root' }, '');
 // console.log(Object.keys(items).map(k => `${k}: ${items[k].length}`));
 
 // console.log(items.nonLeafWithoutRequest.map(i => `${i.path}.${i.item.name}`));
-const itemWithEventsThat = f => i => i.item.event && i.item.event.some(f);
+const itemWithEventsThat = f => i => i.data.event && i.data.event.some(f);
 const eventThatExecs = ev => ev.script.exec.find(code => code !== '');
 const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
 
@@ -134,14 +156,15 @@ const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
 // All event types are in events.listen, all script tuypes are in events.types
 // pp(events);
 
-// pp(items.nonLeafWithoutRequest.find(i => i.item.name === 'feature-tests').item.name);
-// pp(items.leafWithRequest[0].item.request);
+// pp(items.nonLeafWithoutRequest.find(i => i.data.name === 'feature-tests').data.name);
+// pp(items.leafWithRequest[0].data.request);
 // pp(requestCodeGen.getLanguageList());
 
 (async () => {
-    await createOrReplaceOutputDir('result');
+    console.log(generateTestFile());
+    // await createOrReplaceOutputDir('result');
     // console.log(items.leafWithRequest[0]);
-    console.log(await transformToTest(items.leafWithRequest[0]));
+    // console.log(await transformToTest(items.leafWithRequest[0]));
 })();
 
 // Current thinking:
