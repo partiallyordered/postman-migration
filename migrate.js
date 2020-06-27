@@ -30,18 +30,17 @@ const { promisify } = require('util');
 const requestCodeGen = require('./axios-requestgen');
 const convertRequest = async (req) => {
     const pmRequest = new sdk.Request(req);
-    const opts = { trimRequestBody: true, followRedirect: true };
+    const opts = {
+        trimRequestBody: true,
+        followRedirect: true,
+        ES6_enabled: true,
+        requireAxiosLib: false,
+        // requestTimeout: 2000,
+    };
     return promisify(requestCodeGen.convert)(pmRequest, opts);
 };
 
 const items = {
-    // Recurse into the structure to find
-    // 1. leaf items without requests
-    // 2. non-leaf items with requests
-    //
-    // 1. items with requests
-    // 2. items without requests but with events
-    // 3. 
     leafWithoutRequests: [],
     nonLeafWithRequest: [],
     leafWithRequest: [],
