@@ -11,5 +11,10 @@
   "license": "ISC",
   "dependencies": {
     "postman-collection": "^3.6.2"
+  },
+  "devDependencies": {
+    "axios": "^0.19.2",
+    "chai": "^4.2.0",
+    "uuid": "^8.2.0"
   }
 }
