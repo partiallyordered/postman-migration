@@ -145,6 +145,15 @@ const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
     // await createOrReplaceOutputDir('result');
     // console.log(items.leafWithRequest[0]);
     // const src = await transformToTest(items.leafWithRequest[0]);
+
+    // We should consider performing some transformations before code generation, because it might
+    // be easier to identify duplicated functionality manually. Consider, for example, identifying
+    // a collection item called 'Deposit Funds in Settlement Account - testfsp3'.
+    // This should in fact be relatively easy with source code transformation, and in fact we want
+    // to transform the resulting code. However, we could just clean-slate replace that code in the
+    // original collection item.
+    // Anyway... start with source code transformation, but keep in mind transformation of the
+    // collection before code generation.
     const src = await transformCollection(collection);
     await fs.writeFile('./res.js', src);
     // console.log(src);
