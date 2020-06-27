@@ -1,9 +1,20 @@
 
-const collection = require('./Golden_Path_Mowali.postman_collection.json');
+// TODO:
+// - _When the non-leaf nodes do not contain code_ the test structure can be reproduced as
+//    directories, or as `describe` blocks. This could probably be quite usefully configurable.
+// - https://medium.com/airbnb-engineering/turbocharged-javascript-refactoring-with-codemods-b0cae8b326b9
+// - https://github.com/facebook/jscodeshift
+// - https://github.com/benjamn/recast
+// - https://www.reaktor.com/blog/an-introduction-to-codemods/
+// - https://github.com/cmstead/js-refactor
+// - our tests use setTimeout variously- can we move most of that usage to the third parameter in
+//   the `it` test block?
+// - lint-fix?
 
-// console.log(Object.keys(collection.item[0]));
-// console.log(collection.item[0]);
-// console.log()
+const collection = require('../Golden_Path_Mowali.postman_collection.json');
+const util = require('util');
+const pp = (...args) => console.log(util.inspect(...args, { depth: Infinity, colors: true }));
+const fs = require('fs/promises');
 
 const items = {
     // Recurse into the structure to find
@@ -19,11 +30,20 @@ const items = {
     nonLeafWithoutRequest: [],
 
     all: [],
-    withRequests: [],
-    withoutRequestsWithEvents: [],
+};
+
+const events = {
+    listen: new Set(),
+    types: new Set(),
 };
 
 const recurse = (item, path) => {
+    if (item.event) {
+        item.event.forEach(ev => {
+            events.listen.add(ev.listen);
+            events.types.add(ev.script.type)
+        })
+    }
     items.all.push({ item, path });
     if (!item.request && !item.item) {
         items.leafWithoutRequests.push({ item, path });
@@ -42,12 +62,47 @@ const recurse = (item, path) => {
     }
 };
 
+const createOrReplaceOutputDir = async (name) => {
+    await fs.unlink(name).catch(() => {}); // ignore error
+    await fs.mkdir(name);
+}
+
+const transformToTest = ({ leafItemWithRequest: i }) => {
+    // 
+}
+
 recurse({ ...collection, name: 'root' }, '');
 
 console.log(Object.keys(items).map(k => `${k}: ${items[k].length}`));
 
 // console.log(items.nonLeafWithoutRequest.map(i => `${i.path}.${i.item.name}`));
-console.log(items.nonLeafWithoutRequest.filter(i => i.item.event).length)
+const itemWithEventsThat = f => i => i.item.event && i.item.event.some(f);
+const eventThatExecs = ev => ev.script.exec.find(code => code !== '');
+const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
+// non-leaf items with executing events (i.e. pre-request scripts, or post-request tests)
+// none of these, phew
+pp(items.nonLeafWithoutRequest.filter(itemWithEventsThatExec).length);
+// leaf items with executing events (i.e. pre-request scripts, or post-request tests)
+// "leaf items" are generally tests. They have some pre-request scripts that occur, and some
+// post-request tests. Many assertions occur in these "executing events".
+pp(items.leafWithRequest.filter(itemWithEventsThatExec).length);
+// all of the items with executing events (i.e. pre-request scripts, or post-request tests)
+// Luckily, this also turns out to be the same number as "leaf items" with "executing events".
+pp(items.all.filter(itemWithEventsThatExec).length);
+// All event types are in events.listen, all script tuypes are in events.types
+pp(events);
+
+pp(items.nonLeafWithoutRequest.find(i => i.item.name === 'feature-tests').item.name);
+pp(items.leafWithRequest[0]);
+
+(async () => {
+    createOrReplaceOutputDir('test');
+})();
+
+// Current thinking:
+// - _all_ requests can be categorised as follows (thank goodness):
+//   - non-leaf items that do not have any scripts associated with them
+//   - leaf items that have requests and executable scripts associated with them
 
 // TODO
 // - What is this?
