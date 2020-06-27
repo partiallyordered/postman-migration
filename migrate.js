@@ -3,8 +3,8 @@
 // - _When the non-leaf nodes do not contain code_ the test structure can be reproduced as
 //    directories, or as `describe` blocks. This could probably be quite usefully configurable.
 // - Automatic rewriting:
-//   - https://medium.com/airbnb-engineering/turbocharged-javascript-refactoring-with-codemods-b0cae8b326b9
 //   - https://github.com/facebook/jscodeshift
+//   - https://medium.com/airbnb-engineering/turbocharged-javascript-refactoring-with-codemods-b0cae8b326b9
 //   - https://github.com/benjamn/recast
 //   - https://www.reaktor.com/blog/an-introduction-to-codemods/
 //   - https://github.com/cmstead/js-refactor
@@ -24,10 +24,11 @@
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
-const pp = (...args) => console.log(util.inspect(...args, { depth: Infinity, colors: true }));
+const pp = (...args) => console.log(util.inspect(...args, { depth: 2, colors: true }));
 const fs = require('fs').promises;
 const sdk = require('postman-collection');
 const generateTestFile = require('./generateTestFile');
+const jscodeshift = require('jscodeshift');
 
 const requestCodeGen = require('./axios-requestgen');
 const convertRequest = async (req) => {
@@ -127,7 +128,7 @@ const transformToTest = async ({ data: d }) => {
     // "tests"
     const test = getEventScriptByType('test');
 
-    return `${preRequest}\n${req}\n${test}`;
+    return `it('${d.name}', async () => {\n${preRequest}\n${req}\n${test}\n});`;
 };
 
 recurse({ ...collection, name: 'root' }, '');
@@ -161,10 +162,48 @@ const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
 // pp(requestCodeGen.getLanguageList());
 
 (async () => {
-    console.log(generateTestFile());
+    // console.log(generateTestFile());
     // await createOrReplaceOutputDir('result');
     // console.log(items.leafWithRequest[0]);
-    // console.log(await transformToTest(items.leafWithRequest[0]));
+    const src = await transformToTest(items.leafWithRequest[0]);
+    await fs.writeFile('./res.js', src);
+    // console.log(src);
+    const result = jscodeshift(src)
+        .find(jscodeshift.CallExpression)
+        // .at(0)
+        .forEach((path) => {
+            // Produces the function name when it's a single function, i.e. `Number(args)`.
+            // Doesn't work when it's a MemberExpression, i.e. `uuid.v4(args)`.
+            // pp(path.value.callee.loc.identifierName);
+
+            // Produces the MemberExpression when it's a object.property, i.e. `uuid.v4(args)`
+            // Doesn't work when it's a more nested MemberExpression, i.e. `pm.environment.set`.
+            // pp(`${path.value.callee.object.name}.${path.value.callee.property.name}`);
+
+            // Produces the correct value in all scenarios
+            const { start, end } = path.value.callee;
+            pp(src.slice(start, end));
+            // pp(path.value);
+        })
+        .toSource();
+    // const result = jscodeshift(src)
+    //     .find(jscodeshift.Identifier)
+    //     // .filter((path) => (path.value.name === 'get'))
+    //     .filter((path) => (path.value.name === 'get' && path.parent.value.type === 'MemberExpression'))
+    //     .at(0)
+    //     .map((path) => {
+    //         pp(path.value.name);
+    //         pp(path.parent);
+    //         // pp(path.parent.value);
+    //         // pp(path.parent.value.object.object.name);
+    //         // pp(path.parent.value);
+    //         // path.value.name = 'HAHAHAHAHA';
+    //         // console.log(path.parentPath.value);
+    //         // Identifier name:
+    //         // console.log(path.value.name);
+    //     })
+    //     .toSource();
+    // console.log(result);
 })();
 
 // Current thinking:
