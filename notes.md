@@ -4,10 +4,12 @@ Method
 2. Categorise all "item" instances as either leaf or non-leaf nodes.
 3. Categorise all leaf nodes as those that had requests and those that did not have requests. All
    have requests, presumably this is a property that is enforced by test creation in Postman.
+   NB: the Postman collection schema has two types for _Item_: _Item_ and _Folder_.
 4. Categorise all non-leaf nodes as those that had requests and those that did not have requests.
    No non-leaf nodes had requests, presumably this is a property that is enforced by folder
    creation in Postman. Therefore, leaf nodes will henceforth be referred to as _requests_ and
    non-leaf nodes will be referred to as _folders_. (This may be the Postman parlance).
+   NB: the Postman collection schema has two types for _Item_: _Item_ and _Folder_.
 5. Categorise all folders (remembering that none have requests) into those that have event scripts
    and those that do not. It is possible for folders to have event scripts that will run before or
    after all the tests stored within them, but none of the Mowali/ML tests do this.
