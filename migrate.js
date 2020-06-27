@@ -14,7 +14,7 @@
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
 const pp = (...args) => console.log(util.inspect(...args, { depth: Infinity, colors: true }));
-const fs = require('fs/promises');
+const fs = require('fs').promises;
 
 const items = {
     // Recurse into the structure to find
@@ -63,13 +63,13 @@ const recurse = (item, path) => {
 };
 
 const createOrReplaceOutputDir = async (name) => {
-    await fs.unlink(name).catch(() => {}); // ignore error
+    await fs.rmdir(name, { recursive: true }).catch(() => {}); // ignore error
     await fs.mkdir(name);
-}
+};
 
 const transformToTest = ({ leafItemWithRequest: i }) => {
     // 
-}
+};
 
 recurse({ ...collection, name: 'root' }, '');
 
@@ -96,7 +96,7 @@ pp(items.nonLeafWithoutRequest.find(i => i.item.name === 'feature-tests').item.n
 pp(items.leafWithRequest[0]);
 
 (async () => {
-    createOrReplaceOutputDir('test');
+    await createOrReplaceOutputDir('result');
 })();
 
 // Current thinking:
