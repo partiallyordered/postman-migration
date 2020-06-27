@@ -21,6 +21,8 @@ Method
     ```sh
     grep 'pm\.iterationData\.get([^)]*)' Golden_Path_Mowali.postman_collection.json -o | sort | uniq > pm.iterationData.get
     ```
+8. Confirmed that all instances of `.event.script.type === 'text/javascript'`. I.e. all prerequest
+   and test scripts are javascript.
 
 Examine all instances of the `pm` global to see what we use
 - Can we just _implement_ the `pm` global in the output?
