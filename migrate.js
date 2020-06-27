@@ -26,22 +26,19 @@ const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
 const pp = (...args) => console.log(util.inspect(...args, { depth: 2, colors: true }));
 const fs = require('fs').promises;
-const sdk = require('postman-collection');
-const generateTestFile = require('./generateTestFile');
 const jscodeshift = require('jscodeshift');
+const { transformCollection } = require('./transformCollection');
 
-const requestCodeGen = require('./axios-requestgen');
-const convertRequest = async (req) => {
-    const pmRequest = new sdk.Request(req);
-    const opts = {
-        trimRequestBody: true,
-        followRedirect: true,
-        ES6_enabled: true,
-        requireAxiosLib: false,
-        // requestTimeout: 2000,
-    };
-    return util.promisify(requestCodeGen.convert)(pmRequest, opts);
-};
+const preamble = `
+const axios = require('axios');
+const uuid = require('uuid');
+const { createPmSandbox } = require('./pm');
+const pm = createPmSandbox({});
+const pmEnv = require('../environments/Casa-DEV.postman_environment.json')
+    .values
+    .filter(v => v.enabled);
+pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));
+`;
 
 const items = {
     leafWithoutRequests: [],
@@ -102,36 +99,12 @@ const recurse = (item, path) => {
     }
 };
 
+recurse({ ...collection, name: 'root' }, '');
+
 const createOrReplaceOutputDir = async (name) => {
     await fs.rmdir(name, { recursive: true }).catch(() => {}); // ignore error
     await fs.mkdir(name);
 };
-
-// Take the pre-request code, the request, and the post-request scripts (generally tests and
-// assertions, but sometimes environment setting etc.)
-const transformToTest = async ({ data: d }) => {
-    // TODO:
-    // - replace variables i.e. '{{HOST_CENTRAL_LEDGER}}' in requests with references to
-    //   `pm.environment` or `pm.variables` or whatever's appropriate.
-    // - remove trailing whitespace
-    // - hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
-
-    // Utilities
-    const getEventScriptByType = (evType) => d.event.find(ev => ev.listen === evType).script.exec.join('\n');
-
-    // "pre-request scripts"
-    const preRequest = getEventScriptByType('prerequest');
-
-    // request
-    const req = await convertRequest(d.request);
-
-    // "tests"
-    const test = getEventScriptByType('test');
-
-    return `it('${d.name}', async () => {\n${preRequest}\n${req}\n${test}\n});`;
-};
-
-recurse({ ...collection, name: 'root' }, '');
 
 // Print counts of the various categories of node
 // console.log(Object.keys(items).map(k => `${k}: ${items[k].length}`));
@@ -162,10 +135,17 @@ const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
 // pp(requestCodeGen.getLanguageList());
 
 (async () => {
+    // TODO:
+    // - replace variables i.e. '{{HOST_CENTRAL_LEDGER}}' in requests with references to
+    //   `pm.environment` or `pm.variables` or whatever's appropriate.
+    // - remove trailing whitespace
+    // - hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
+
     // console.log(generateTestFile());
     // await createOrReplaceOutputDir('result');
     // console.log(items.leafWithRequest[0]);
-    const src = await transformToTest(items.leafWithRequest[0]);
+    // const src = await transformToTest(items.leafWithRequest[0]);
+    const src = await transformCollection(collection);
     await fs.writeFile('./res.js', src);
     // console.log(src);
     const result = jscodeshift(src)
@@ -182,7 +162,7 @@ const itemWithEventsThatExec = itemWithEventsThat(eventThatExecs);
 
             // Produces the correct value in all scenarios
             const { start, end } = path.value.callee;
-            pp(src.slice(start, end));
+            // pp(src.slice(start, end));
             // pp(path.value);
         })
         .toSource();
