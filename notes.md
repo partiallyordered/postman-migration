@@ -192,6 +192,14 @@ Shortcomings of Postman:
 1. impossible to diff, version control, peer review
 2. global state shared between tests
 3. code reuse is difficult and painful
+    * it's difficult to factor repeated code into a function for reuse elsewhere in the tests
+    * it's _more_ difficult to factor repeated code into a function for reuse outside the tests
+    * it's practically impossible to have two people develop the tests simultaneously then
+        reconcile their changes in version control
+4. no watch mode
+5. not portable (as evidenced by this effort)- test runners from npm often provide automatic
+   conversion scripts
 Good features of Postman:
 1. pleasant UI for running subsets of tests etc
 2. some good aspects of test report output
+3. easier to run a subset of tests
