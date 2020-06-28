@@ -66,21 +66,20 @@ const transformItem = async (item) => {
     }
     else if (!item.request && item.item) {
         if (item.event && item.event.some(ev => ev.script.exec.find(line => line !== ''))) {
-            // TODO: handle these scenarios
+            // TODO: handle folders with pre-request or test scripts.
             // At the time of writing this comment, it's likely the collection tree will be
             // representated as a tree of _Folder_/_Request_. When transforming this tree to tests,
             // it's likely a _Folder_ will transform to a `describe` block, and a _Request_ will
             // transform to a `it` block.
             // Therefore, handling the situation where a _Folder_ contains before/after scripts
-            // will amount to producing that code as `.beforeAll` and `.afterAll` functions.
+            // will amount to producing that code as `.beforeEach` and `.afterEach` functions.
             throw new Error('Unhandled folder type with pre-request or test script');
         }
         return await transformFolderToDescribe(item);
     }
 };
 
-// const transformCollection = (coll) => transformItem(coll.item);
-
 module.exports = {
     transformCollection: transformItem,
+    convertRequest,
 };

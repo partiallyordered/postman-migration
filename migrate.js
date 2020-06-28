@@ -23,13 +23,22 @@
 // - replace all usage of eval..
 // - figure out how it's easiest to run a single test in jest. Is there a UI that lets you run a
 //   single spec/describe block? `jest -t` could enable this.
+// - What is this?
+//   "protocolProfileBehavior": {
+//     "disableBodyPruning": true
+//   }
+//   Docs say:
+//   Protocol Profile Behavior
+//   Set of configurations used to alter the usual behavior of sending the request
+//   https://schema.getpostman.com/collection/json/v2.1.0/draft-07/docs/index.html
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
 const pp = (...args) => console.log(util.inspect(...args, { depth: 2, colors: true }));
 const fs = require('fs').promises;
 const jscodeshift = require('jscodeshift');
-const { transformCollection } = require('./transformCollection');
+const { transformCollection, convertRequest } = require('./transformCollection');
+const assert = require('assert').strict;
 
 const preamble = `
 const axios = require('axios');
@@ -53,6 +62,7 @@ const createOrReplaceOutputDir = async (name) => {
     //   `pm.environment` or `pm.variables` or whatever's appropriate.
     // - remove trailing whitespace
     // - hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
+    // - convert all pm.sendRequest to axios using convertRequest
 
     // console.log(generateTestFile());
     // await createOrReplaceOutputDir('result');
@@ -68,26 +78,57 @@ const createOrReplaceOutputDir = async (name) => {
     // Anyway... start with source code transformation, but keep in mind transformation of the
     // collection before code generation.
     const src = await transformCollection(collection);
-    await fs.writeFile('./res.js', src);
+    // await fs.writeFile('./res.js', src);
     // console.log(src);
-    const result = jscodeshift(src)
-        .find(jscodeshift.CallExpression)
-        // .at(0)
-        .forEach((path) => {
-            // Produces the function name when it's a single function, i.e. `Number(args)`.
-            // Doesn't work when it's a MemberExpression, i.e. `uuid.v4(args)`.
-            // pp(path.value.callee.loc.identifierName);
+    const summarise = (astValue) => {
+        const getPos = (astValue) => `L${astValue.loc.start.line} C${astValue.loc.start.column}`;
+        const { start, end } = astValue;
+        return `[${getPos(astValue)}]: ${src.slice(start, end)}`;
+    };
+    const callExpressionMatching = (expression) => (astPath) => {
+        const { start, end } = astPath.value.callee;
+        const call = src.slice(start, end);
+        return call.match(expression); //new RegExp(`^${expression}$`))
+    };
+    const getAllPmSendRequest = () => {
+        const result = jscodeshift(src)
+            .find(jscodeshift.CallExpression)
+            .filter(callExpressionMatching(/^pm.sendRequest$/))
+            .at(0)
+            .forEach((path) => {
+                // Produces the function name when it's a single function, i.e. `Number(args)`.
+                // Doesn't work when it's a MemberExpression, i.e. `uuid.v4(args)`.
+                // pp(path.value.callee.loc.identifierName);
 
-            // Produces the MemberExpression when it's a object.property, i.e. `uuid.v4(args)`
-            // Doesn't work when it's a more nested MemberExpression, i.e. `pm.environment.set`.
-            // pp(`${path.value.callee.object.name}.${path.value.callee.property.name}`);
+                // Produces the MemberExpression when it's a object.property, i.e. `uuid.v4(args)`
+                // Doesn't work when it's a more nested MemberExpression, i.e. `pm.environment.set`.
+                // pp(`${path.value.callee.object.name}.${path.value.callee.property.name}`);
 
-            // Produces the correct value in all scenarios
-            const { start, end } = path.value.callee;
-            // pp(src.slice(start, end));
-            // pp(path.value);
-        })
-        .toSource();
+                // Produces the correct value in all scenarios
+                // const { start, end } = path.value.callee;
+                // pp(`[${start}, ${end}]: ${src.slice(start, end)}`);
+
+                // const getPos = (path) => path.value.loc.start
+                // Produces the correct value in all scenarios
+                pp(summarise(path.value));
+                assert(path.value.arguments.length === 2);
+                const identifiers = path.value.arguments.filter((arg) => arg.type === 'Identifier');
+                // Is there always an identifier? Is it sometimes a string?
+                assert(identifiers.length === 1);
+                pp(identifiers[0]);
+                pp(summarise(identifiers[0]));
+                // pp(path.value.arguments);
+                // pp(summarise(path.parent));
+                // pp(path.parent);
+                // pp(path.value);
+            })
+            .toSource();
+    };
+    const getNodeDefinition = (astPath) => {
+
+    };
+    getAllPmSendRequest();
+    await fs.writeFile('./res.js', src);
     // const result = jscodeshift(src)
     //     .find(jscodeshift.Identifier)
     //     // .filter((path) => (path.value.name === 'get'))
@@ -107,18 +148,3 @@ const createOrReplaceOutputDir = async (name) => {
     //     .toSource();
     // console.log(result);
 })();
-
-// Current thinking:
-// - _all_ requests can be categorised as follows (thank goodness):
-//   - non-leaf items that do not have any scripts associated with them
-//   - leaf items that have requests and executable scripts associated with them
-
-// TODO
-// - What is this?
-//   "protocolProfileBehavior": {
-//     "disableBodyPruning": true
-//   }
-//   Docs say:
-//   Protocol Profile Behavior
-//   Set of configurations used to alter the usual behavior of sending the request
-//   https://schema.getpostman.com/collection/json/v2.1.0/draft-07/docs/index.html
