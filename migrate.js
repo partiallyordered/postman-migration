@@ -11,16 +11,12 @@
 //   - https://www.toptal.com/javascript/write-code-to-rewrite-your-code
 //   - https://slacker.ro/2019/04/04/automating-the-migration-of-lodash-to-lodash-es-in-a-large-codebase-with-jscodeshift/
 //   - https://skovy.dev/jscodeshift-custom-transform/
-// - our tests use setTimeout variously- can we move most of that usage to the third parameter in
-//   the `it` test block? E.g. https://github.com/facebook/jest/issues/5055
 // - lint-fix?
 // - jest serial mode
 // - postman bundled libraries and "sandbox" API:
 //   https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/
 //   https://github.com/postmanlabs/postman-sandbox
 //   https://github.com/postmanlabs/postman-runtime
-// - replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
-// - replace all usage of eval..
 // - figure out how it's easiest to run a single test in jest. Is there a UI that lets you run a
 //   single spec/describe block? `jest -t` could enable this.
 // - What is this?
@@ -39,6 +35,7 @@ const fs = require('fs').promises;
 const jscodeshift = require('jscodeshift');
 const { transformCollection, convertRequest } = require('./transformCollection');
 const assert = require('assert').strict;
+const recast = require('recast');
 
 const preamble = `
 const axios = require('axios');
@@ -78,57 +75,89 @@ const createOrReplaceOutputDir = async (name) => {
     // Anyway... start with source code transformation, but keep in mind transformation of the
     // collection before code generation.
     const src = await transformCollection(collection);
-    // await fs.writeFile('./res.js', src);
-    // console.log(src);
+    const j = jscodeshift(src);
+    fs.writeFile('./res.js', src); // don't need to await this
+
+    // Check node equivalence. Useful for determining whether two variables have the same definition.
+    // Next: write something to determine the lowest shared scope. Seems `path` types have a `.scope`
+    // property.
+    // Usage: astNodesAreEquivalent(path1.value, path2.value)
+    const astNodesAreEquivalent = recast.types.astNodesAreEquivalent;
+
+    // Print the source code of a given expression
     const summarise = (astValue) => {
         const getPos = (astValue) => `L${astValue.loc.start.line} C${astValue.loc.start.column}`;
         const { start, end } = astValue;
         return `[${getPos(astValue)}]: ${src.slice(start, end)}`;
     };
-    const callExpressionMatching = (expression) => (astPath) => {
-        const { start, end } = astPath.value.callee;
-        const call = src.slice(start, end);
-        return call.match(expression); //new RegExp(`^${expression}$`))
+
+    // As long as this is true, we can implement pm.sendRequest in the sandbox
+    const assertPmHttpRequestsAreAllPojos = () => {
+        const getDeclarationForIdentifierMatching = (j, regex) => j
+            .find(jscodeshift.VariableDeclarator)
+            .filter((path) => path.value.id.type === 'Identifier') // TODO performance: probably always true, could be elided
+            .filter((path) => path.value.id.name.match(regex));
+
+        const callExpressionMatching = (regex) => (astPath) => {
+            const { start, end } = astPath.value.callee;
+            const call = src.slice(start, end);
+            return call.match(regex); //new RegExp(`^${expression}$`))
+        };
+
+        const pmRequests = j.find(jscodeshift.CallExpression)
+            .filter(callExpressionMatching(/^pm.sendRequest$/)); //getAllPmSendRequestRequestArguments(j);
+
+        // All calls to pm.sendRequest have two arguments
+        assert(pmRequests.every((path) => path.value.arguments.length === 2));
+
+        const firstArgs = pmRequests.map((path) => path.get('arguments').get('0'));
+
+        // The first argument is always type `Identifier`
+        // I.e. the first argument is a variable name, not a string
+        //   pm.sendRequest(requestToSimulator, ...)
+        // NOT:
+        //   pm.sendRequest('simulator', ...)
+        assert(firstArgs.every((path) => path.value.type === 'Identifier'));
+
+        // The identifier supplied in the first argument is always declared as a POJO
+        // Note that this just checks _every_ instance of a declaration matching a given identifier
+        // name. It doesn't actually check for the _specific_ instance of a declaration.
+        // This means that the following would pass:
+        //   let requestToSimulator = { what: 'ever' }
+        //   pm.sendRequest(requestToSimulator, ...)
+        // But this would fail, even though the variable is overwritten _after_ the call to
+        // sendRequest:
+        //   let requestToSimulator = { what: 'ever' }
+        //   pm.sendRequest(requestToSimulator, ...)
+        //   requestToSimulator = 'overwritten';
+        // Luckily for us, it turns out that our tests don't overwrite variables like this, because
+        // that would make this exercise more difficult.
+        assert(firstArgs.every((path) =>
+            getDeclarationForIdentifierMatching(j, /^path.name$/).every((path) =>
+                path.value.init.type === 'ObjectExpression'
+            )));
     };
-    const getAllPmSendRequest = () => {
-        const result = jscodeshift(src)
-            .find(jscodeshift.CallExpression)
-            .filter(callExpressionMatching(/^pm.sendRequest$/))
-            .at(0)
-            .forEach((path) => {
-                // Produces the function name when it's a single function, i.e. `Number(args)`.
-                // Doesn't work when it's a MemberExpression, i.e. `uuid.v4(args)`.
-                // pp(path.value.callee.loc.identifierName);
+    assertPmHttpRequestsAreAllPojos();
 
-                // Produces the MemberExpression when it's a object.property, i.e. `uuid.v4(args)`
-                // Doesn't work when it's a more nested MemberExpression, i.e. `pm.environment.set`.
-                // pp(`${path.value.callee.object.name}.${path.value.callee.property.name}`);
+    // TODO: transformations:
+    // 1. Replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
+    // 2. Replace all usage of eval..
+    // 3. Identify pm.environment.get and pm.environment.set calls, and their scope, then declare
+    //    variables at an appropriate level (or don't and manually evaluate this stuff)
+    // 4. Identify pm.variables.get/set and create those variables with an appropriate scope in the
+    //    code.
+    // 5. Transform usages of setTimeout where it's the last call made in a given test. We can move
+    //    most of that usage to the third parameter in the `it` test block? E.g.
+    //    https://github.com/facebook/jest/issues/5055
 
-                // Produces the correct value in all scenarios
-                // const { start, end } = path.value.callee;
-                // pp(`[${start}, ${end}]: ${src.slice(start, end)}`);
+    // Example:
+    // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
+    // copy-pasted)
+    // const decs = getDeclarationForIdentifierMatching(j, /^testfsp3GetStatusRequest$/);
+    // const nodes = decs.nodes();
+    // pp(nodes.length);
+    // pp(astNodesAreEquivalent(nodes[0], nodes[1]));
 
-                // const getPos = (path) => path.value.loc.start
-                // Produces the correct value in all scenarios
-                pp(summarise(path.value));
-                assert(path.value.arguments.length === 2);
-                const identifiers = path.value.arguments.filter((arg) => arg.type === 'Identifier');
-                // Is there always an identifier? Is it sometimes a string?
-                assert(identifiers.length === 1);
-                pp(identifiers[0]);
-                pp(summarise(identifiers[0]));
-                // pp(path.value.arguments);
-                // pp(summarise(path.parent));
-                // pp(path.parent);
-                // pp(path.value);
-            })
-            .toSource();
-    };
-    const getNodeDefinition = (astPath) => {
-
-    };
-    getAllPmSendRequest();
-    await fs.writeFile('./res.js', src);
     // const result = jscodeshift(src)
     //     .find(jscodeshift.Identifier)
     //     // .filter((path) => (path.value.name === 'get'))
