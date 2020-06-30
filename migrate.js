@@ -91,13 +91,10 @@ const createOrReplaceOutputDir = async (name) => {
         return `[${getPos(astValue)}]: ${src.slice(start, end)}`;
     };
 
-    // As long as this is true, we can implement pm.sendRequest in the sandbox
+    // Ensure all pm.sendRequest calls are HTTP GET requests made with a POJO as the first
+    // argument.
+    // This guides our implementation of pm.sendRequest in our sandbox implementation.
     const assertPmHttpRequestsAreAllPojos = () => {
-        const getDeclarationForIdentifierMatching = (j, regex) => j
-            .find(jscodeshift.VariableDeclarator)
-            .filter((path) => path.value.id.type === 'Identifier') // TODO performance: probably always true, could be elided
-            .filter((path) => path.value.id.name.match(regex));
-
         const callExpressionMatching = (regex) => (astPath) => {
             const { start, end } = astPath.value.callee;
             const call = src.slice(start, end);
@@ -105,7 +102,7 @@ const createOrReplaceOutputDir = async (name) => {
         };
 
         const pmRequests = j.find(jscodeshift.CallExpression)
-            .filter(callExpressionMatching(/^pm.sendRequest$/)); //getAllPmSendRequestRequestArguments(j);
+            .filter(callExpressionMatching(/^pm.sendRequest$/));
 
         // All calls to pm.sendRequest have two arguments
         assert(pmRequests.every((path) => path.value.arguments.length === 2));
@@ -119,23 +116,52 @@ const createOrReplaceOutputDir = async (name) => {
         //   pm.sendRequest('simulator', ...)
         assert(firstArgs.every((path) => path.value.type === 'Identifier'));
 
-        // The identifier supplied in the first argument is always declared as a POJO
-        // Note that this just checks _every_ instance of a declaration matching a given identifier
-        // name. It doesn't actually check for the _specific_ instance of a declaration.
-        // This means that the following would pass:
-        //   let requestToSimulator = { what: 'ever' }
-        //   pm.sendRequest(requestToSimulator, ...)
-        // But this would fail, even though the variable is overwritten _after_ the call to
-        // sendRequest:
-        //   let requestToSimulator = { what: 'ever' }
-        //   pm.sendRequest(requestToSimulator, ...)
-        //   requestToSimulator = 'overwritten';
-        // Luckily for us, it turns out that our tests don't overwrite variables like this, because
-        // that would make this exercise more difficult.
-        assert(firstArgs.every((path) =>
-            getDeclarationForIdentifierMatching(j, /^path.name$/).every((path) =>
-                path.value.init.type === 'ObjectExpression'
-            )));
+        // Some analysis of the first argument to pm.sendRequest:
+        firstArgs.forEach((path) => {
+            const declarations = j
+                .find(jscodeshift.Identifier)
+                .filter(p => p.value.name.match(new RegExp(`^${path.value.name}$`)))
+                .getVariableDeclarators(path => path.value.name);
+
+            // The identifier supplied in the first argument is always declared as a POJO
+            // Note that this just checks _every_ instance of a declaration matching a given identifier
+            // name. It doesn't actually check for the _specific_ instance of a declaration.
+            // This means that the following would pass:
+            //   let requestToSimulator = { what: 'ever' }
+            //   pm.sendRequest(requestToSimulator, ...)
+            // But this would fail, even though the variable is overwritten _after_ the call to
+            // sendRequest:
+            //   let requestToSimulator = { what: 'ever' }
+            //   pm.sendRequest(requestToSimulator, ...)
+            //   requestToSimulator = 'overwritten';
+            // Luckily for us, it turns out that our tests don't overwrite variables like this, because
+            // that would make this exercise more difficult.
+            assert(
+                declarations.every((path) => path.value.init.type === 'ObjectExpression'),
+                'Every declaration of every first argument to pm.sendRequest is a POJO assignment'
+            );
+
+            // Assert that for every assignment there is a first-level `method` property with the
+            // value `'get'` (case-insensitive). I.e. every declaration looks like:
+            // const requestArg = {
+            //   method: 'get', // or 'GET' or 'Get'
+            //   ... // other stuff we don't care about
+            // };
+            declarations.forEach((path) => {
+                const methods = path.get('init').get('properties').filter((path) => path.value.key.name === 'method');
+                assert(
+                    methods.length > 0,
+                    'Every declaration assignment contains a `method` property'
+                );
+                // We don't actually care if there is more than one method- the last one will
+                // define the value.
+                const assignedValue = methods[methods.length - 1].get('value');
+                assert(
+                    assignedValue.value.type === 'Literal' && assignedValue.value.value.match(/get/i),
+                    'Every `method` value is a string literal `\'get\'`.'
+                );
+            });
+        });
     };
     assertPmHttpRequestsAreAllPojos();
 
@@ -151,12 +177,21 @@ const createOrReplaceOutputDir = async (name) => {
     //    https://github.com/facebook/jest/issues/5055
     // 6. Replace (some?) duplicated string values with variables. Might require analysis on a
     //    case-by-case basis.
+    // 7. Wherever a request is made, set pm.response with the expected form. Else, if this proves
+    //    to be difficult, wherever a request is made, consider modifying the transform to wrap it
+    //    in a function that returns the expected form. I.e. modifying
+    //    axios-requestgen/lib/axios.js to return an IIFE like
+    //    pm.response = (() => { axios stuff returning the correct pm.response interface });
 
     // Example:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
     // copy-pasted)
-    // const decs = getDeclarationForIdentifierMatching(j, /^testfsp3GetStatusRequest$/);
+    // const decs = j
+    //     .find(jscodeshift.Identifier)
+    //     .filter(p => p.value.name.match(/^testfsp3GetStatusRequest$/))
+    //     .getVariableDeclarators(path => path.value.name);
     // const nodes = decs.nodes();
+    // assert(nodes.length > 1);
     // pp(nodes.length);
     // pp(astNodesAreEquivalent(nodes[0], nodes[1]));
 
