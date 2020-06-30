@@ -172,23 +172,42 @@ function parseHeader (request, indentString) {
     headerArray = [];
 
   if (!_.isEmpty(headerObject)) {
-    headerArray = _.reduce(Object.keys(headerObject), function (accumalator, key) {
+    headerArray = _.reduce(Object.keys(headerObject), function (accumulator, key) {
       if (Array.isArray(headerObject[key])) {
         var headerValues = [];
         _.forEach(headerObject[key], (value) => {
           headerValues.push(`${sanitize(value)}`);
         });
-        accumalator.push(
+        accumulator.push(
           indentString.repeat(2) + `'${sanitize(key, true)}': '${headerValues.join(', ')}'`
         );
       }
       else {
-        accumalator.push(
+        accumulator.push(
           indentString.repeat(2) + `'${sanitize(key, true)}': '${sanitize(headerObject[key])}'`
         );
       }
-      return accumalator;
+      return accumulator;
     }, []);
+  }
+  if (request.auth && request.auth.type !== 'noauth') {
+    switch (request.auth.type) {
+      case 'bearer':
+        const token = request.auth.bearer.reference.token.value;
+        headerArray.push(
+          indentString.repeat(2) + `'Authorization': 'Bearer ${sanitize(token)}'`
+        );
+        break;
+      case 'basic':
+        const { username, password } = request.auth.basic.reference;
+        const credentials = Buffer.from(`${username}:${password}`).toString('base64');
+        headerArray.push(
+          indentString.repeat(2) + `'Authorization': 'Basic ${sanitize(credentials)}'`
+        );
+        break;
+      default:
+        throw new Error(`Unhandled auth type ${request.auth.type}. If you're reading this, you'll need to implement this yourself.`);
+    }
   }
 
   return headerArray;

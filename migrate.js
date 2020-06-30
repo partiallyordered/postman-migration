@@ -149,6 +149,8 @@ const createOrReplaceOutputDir = async (name) => {
     // 5. Transform usages of setTimeout where it's the last call made in a given test. We can move
     //    most of that usage to the third parameter in the `it` test block? E.g.
     //    https://github.com/facebook/jest/issues/5055
+    // 6. Replace (some?) duplicated string values with variables. Might require analysis on a
+    //    case-by-case basis.
 
     // Example:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.

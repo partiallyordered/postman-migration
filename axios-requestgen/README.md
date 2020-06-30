@@ -2,6 +2,9 @@
 This is a (very lazy) fork of the Axios code gen from the postman code generators here:
 https://github.com/postmanlabs/postman-code-generators
 
+Not pushed upstream because this is a hack- the code has not been investigated sufficiently to do
+anything the _right_ way, and implementation has been very focused on the use cases of the author.
+
 Original README content follows:
 
 # codegen-nodejs-axios
