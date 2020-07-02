@@ -189,17 +189,30 @@ Documentation for the collection schema:
 Take a migration all the way through to Majestic
 
 Shortcomings of Postman:
-1. impossible to diff, version control, peer review
-2. global state shared between tests
-3. code reuse is difficult and painful
+0. Is there any serious organisation that uses postman for automated testing? No, that's because of
+   the following.
+1. Impossible to diff, version control, peer review
+2. Global state shared between tests
+3. Code reuse is difficult and painful
     * it's difficult to factor repeated code into a function for reuse elsewhere in the tests
     * it's _more_ difficult to factor repeated code into a function for reuse outside the tests
     * it's practically impossible to have two people develop the tests simultaneously then
         reconcile their changes in version control
-4. no watch mode
-5. not portable (as evidenced by this effort)- test runners from npm often provide automatic
-   conversion scripts
+    * it's difficult and painful to incorporate shared code from elsewhere
+4. No watch mode
+5. Not portable (as evidenced by this effort)- in contrast, test runners from npm often provide
+   automatic conversion scripts. For example, the conversion of quoting service from ava to jest
+   was a mostly-automatic job, with about thirty minutes of semi-manual work.
+6. Tooling and ecosystem is inferior.
+7. This refactor effort indicates postman is not appropriate. Why is setTimeout always called with
+   the argument `2000`? Because everyone feels that `pm.environment.get` (mutable global state) is
+   bad and overkill. JS test runners have a _parameter_ for test timeout and "afterall",
+   "aftereach".
+8. Requires training
+9. Enforces usage of a specific tool
+10. Output control, and run control in general is more limited
+11. Image- what other serious open source project uses postman for testing?
 Good features of Postman:
-1. pleasant UI for running subsets of tests etc
-2. some good aspects of test report output
-3. easier to run a subset of tests
+1. Pleasant UI for running subsets of tests etc
+2. Some good aspects of test report output
+3. Easier to run a subset of tests

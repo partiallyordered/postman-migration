@@ -1,5 +1,9 @@
 
 // TODO:
+// - How to verify the transformation is correct?
+//   - Count assertions?
+//   - Count tests (i.e. `it` blocks)?
+// - _Make files_. The current file is way too big to run practically.
 // - _When the non-leaf nodes do not contain code_ the test structure can be reproduced as
 //    directories, or as `describe` blocks. This could probably be quite usefully configurable.
 // - Automatic rewriting:
@@ -27,21 +31,30 @@
 //   Protocol Profile Behavior
 //   Set of configurations used to alter the usual behavior of sending the request
 //   https://schema.getpostman.com/collection/json/v2.1.0/draft-07/docs/index.html
+// - Document that the produced output must be run with "jest": { "testEnvironment": "node" } set
+//   in package.json.
+//   This is because: https://stackoverflow.com/a/42678578
+//   Solution: https://stackoverflow.com/a/44366115
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
 const pp = (...args) => console.log(util.inspect(...args, { depth: 2, colors: true }));
 const fs = require('fs').promises;
-const jscodeshift = require('jscodeshift');
+const jsc = require('jscodeshift');
 const { transformCollection, convertRequest } = require('./transformCollection');
 const assert = require('assert').strict;
 const recast = require('recast');
 
+// TODO: convert this to ast-types? That way we can, for example, refer to setTimeoutPromiseName as
+// a node, rather than a string.
+const setTimeoutPromiseName = 'setTimeoutPromise';
 const preamble = `
 const axios = require('axios');
 const uuid = require('uuid');
 const { createPmSandbox } = require('./pm');
 const pm = createPmSandbox({});
+const { promisify } = require('util');
+const ${setTimeoutPromiseName} = promisify(setTimeout);
 const pmEnv = require('../environments/Casa-DEV.postman_environment.json')
     .values
     .filter(v => v.enabled);
@@ -54,12 +67,6 @@ const createOrReplaceOutputDir = async (name) => {
 };
 
 (async () => {
-    // TODO:
-    // - replace variables i.e. '{{HOST_CENTRAL_LEDGER}}' in requests with references to
-    //   `pm.environment` or `pm.variables` or whatever's appropriate.
-    // - remove trailing whitespace
-    // - hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
-    // - convert all pm.sendRequest to axios using convertRequest
 
     // console.log(generateTestFile());
     // await createOrReplaceOutputDir('result');
@@ -74,15 +81,22 @@ const createOrReplaceOutputDir = async (name) => {
     // original collection item.
     // Anyway... start with source code transformation, but keep in mind transformation of the
     // collection before code generation.
-    const src = await transformCollection(collection);
-    const j = jscodeshift(src);
-    fs.writeFile('./res.js', src); // don't need to await this
+    const src = `${preamble}${await transformCollection(collection)}`;
+    const j = jsc(src);
+    const testCmd = require('./package.json').scripts.test.split(' ');
+    const testFileName = testCmd[testCmd.length - 1];
 
     // Check node equivalence. Useful for determining whether two variables have the same definition.
     // Next: write something to determine the lowest shared scope. Seems `path` types have a `.scope`
     // property.
     // Usage: astNodesAreEquivalent(path1.value, path2.value)
     const astNodesAreEquivalent = recast.types.astNodesAreEquivalent;
+
+    const callExpressionMatching = (regex) => (astPath) => {
+        const { start, end } = astPath.value.callee;
+        const call = src.slice(start, end);
+        return call.match(regex);
+    };
 
     // Print the source code of a given expression
     const summarise = (astValue) => {
@@ -94,14 +108,8 @@ const createOrReplaceOutputDir = async (name) => {
     // Ensure all pm.sendRequest calls are HTTP GET requests made with a POJO as the first
     // argument.
     // This guides our implementation of pm.sendRequest in our sandbox implementation.
-    const assertPmHttpRequestsAreAllPojos = () => {
-        const callExpressionMatching = (regex) => (astPath) => {
-            const { start, end } = astPath.value.callee;
-            const call = src.slice(start, end);
-            return call.match(regex); //new RegExp(`^${expression}$`))
-        };
-
-        const pmRequests = j.find(jscodeshift.CallExpression)
+    const assertPmHttpRequestsAreAllPojos = (j) => {
+        const pmRequests = j.find(jsc.CallExpression)
             .filter(callExpressionMatching(/^pm.sendRequest$/));
 
         // All calls to pm.sendRequest have two arguments
@@ -119,7 +127,7 @@ const createOrReplaceOutputDir = async (name) => {
         // Some analysis of the first argument to pm.sendRequest:
         firstArgs.forEach((path) => {
             const declarations = j
-                .find(jscodeshift.Identifier)
+                .find(jsc.Identifier)
                 .filter(p => p.value.name.match(new RegExp(`^${path.value.name}$`)))
                 .getVariableDeclarators(path => path.value.name);
 
@@ -163,54 +171,246 @@ const createOrReplaceOutputDir = async (name) => {
             });
         });
     };
-    assertPmHttpRequestsAreAllPojos();
+
+    // Transform all pm.sendRequest calls to async. This is because "pre-request", "request", and
+    // "test" stages are no longer controlled to be run separately. Because we won't _check_ that
+    // each stage has completed before the next stage begins, we will instead control this through
+    // the language model. I.e. by making calls async and awaiting them. This will mean that some
+    // functionality that previously occurred concurrently will now be serialised. For example,
+    // some pre-request scripts were previously of this form:
+    //   pm.sendRequest(req, f)
+    //   pm.sendRequest(req, f)
+    // meaning both requests ran concurrently. However, after the transformation, they will execute
+    // serially:
+    //   await pm.sendRequest(req).then(f)
+    //   await pm.sendRequest(req).then(f)
+    // Identifying those requests that can be run concurrently (e.g. with Promise.all) is out of
+    // the scope of this exercise, for now.
+    const transformPmSendRequestToAsync = (j) => {
+        // The signature is:
+        //   pm.sendRequest(req, f)
+        // We previously demonstrate in assertPmHttpRequestsAreAllPojos that all instances of `req`
+        // are POJOs.
+        // The signature of f is:
+        //   f(err, response)
+        // We intend to transform
+        //   pm.sendRequest(req, f)
+        // to:
+        // {
+        //   const resp = await pm.sendRequest(req);
+        //   ... contents of f ...
+        // }
+        // - The code is enclosed in a block statement to avoid any variable naming collisions. For
+        //   example, if we transform
+        //     pm.sendRequest(...)
+        //     pm.sendRequest(...)
+        //   to
+        //     const resp = await pm.sendRequest(req);
+        //     const resp = await pm.sendRequest(req);
+        //   we need the two results to have a different name (we can't say `const resp` twice in the
+        //   same scope). So we change scope with a block statement (curly braces).
+        // - We let the error bubble and cause the test to fail. No problem.
+        //
+        // Our implementation of the postman sandbox will contain an implementation of
+        // pm.sendRequest with this function signature.
+        //
+        // TODO: check that the error is never handled. Here, we're just assuming that
+        // the 'error' parameter that was passed to the pm.sendRequest callback
+        // function wasn't used. We need to be sure of this by trying to find any
+        // identifiers called `error` in the _body_ of these callback functions. (Note
+        // that they _will_ be present in the function parameters).
+        const pmRequests = j.find(jsc.CallExpression)
+            .filter(callExpressionMatching(/^pm.sendRequest$/));
+
+        pmRequests.forEach((path) => {
+            // Extract the pm.sendRequest parameters
+            // TODO: path.get('arguments').value can probably be path.value.arguments
+            const [req, f] = path.get('arguments').value;
+            // Replace them both with the first one
+            path.get('arguments').replace([req]);
+            // Replace pm.sendRequest with await pm.sendRequest
+            path.replace(
+                jsc.blockStatement([
+                    // Roughly: const response = pm.sendRequest(request);
+                    jsc.variableDeclaration(
+                        "const",
+                        [
+                            jsc.variableDeclarator(
+                                f.params[1],
+                                jsc.awaitExpression(
+                                    path.value
+                                )
+                            ),
+                        ]
+                    ),
+                    // TODO: normally the first thing that happens here is `var jsonData =
+                    // response.json()`. This isn't necessary with axios. We should elide this
+                    // call, and modify our sandbox implementation to return the raw axios response
+                    // (which is a POJO).
+                    ...f.body.body
+                ]),
+            );
+        });
+    };
+
+    const assertSetTimeoutCalledWithTwoArgs = (j) => assert(
+        j.find(jsc.CallExpression)
+        .filter(callExpressionMatching(/^setTimeout$/))
+        .every((path) => path.value.arguments.length === 2)
+    );
+
+    // setTimeout is being called within an async function. Therefore, we promisify it according to
+    // https://nodejs.org/api/timers.html#timers_settimeout_callback_delay_args
+    const promisifySetTimeout = (j) => j
+        .find(jsc.CallExpression)
+        .filter(callExpressionMatching(/^setTimeout$/))
+        // .at(0)
+        .forEach((path) => {
+            let [f, timeout] = path.value.arguments;
+            f.async = true;
+            path.replace(
+                jsc.awaitExpression(
+                    jsc.callExpression(
+                        jsc.memberExpression(
+                            jsc.callExpression(
+                                jsc.identifier(setTimeoutPromiseName),
+                                [ timeout ]
+                            ),
+                            jsc.identifier('then')
+                        ),
+                        [ f ]
+                    )
+                )
+            )
+        });
+
+    const replaceStringLiteralsWithPostmanEnvironment = (j) => j
+        .find(jsc.Literal)
+        .filter(
+            (path) => typeof path.value.value === 'string' && path.value.value.match(/{{[^}]+}}/)
+        )
+        // .at(0)
+        .forEach((path) => {
+            // console.log('{{abc}}{{def}}'.replace(/{{([^}]+)}}/g, '`${pm.environment.get($1)}`'));
+            const newStr = path.value.value.replace(/{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}');
+            const newCode = `\`${newStr}\``;
+            const newValue = jsc(newCode).getAST()[0].value;
+            // console.log(newValue);
+            // console.log(newCode);
+            // const k = jsc(newCode);
+            // const k = jsc(newCode).getAST();
+            path.replace(newValue);
+            // console.log(k);
+            // pp(summarise(path.value));
+            // path.replace(
+            //     jsc.expressionStatement(
+            //         jsc.templateLiteral(
+            //
+            //         )
+            //     )
+            // )
+            // console.log(path);
+        });
+
+    // assertPmHttpRequestsAreAllPojos(j);
+    transformPmSendRequestToAsync(j);
+    // assertSetTimeoutCalledWithTwoArgs(j);
+    promisifySetTimeout(j);
+    replaceStringLiteralsWithPostmanEnvironment(j);
+
+    // can postman users use {{}} to access a variable set with pm.variables.set()?
+    // how do we know whether to use pm.variables.get or pm.environment.get for {{}}?
+    // is the environment persisted to the environment json file after a test run?
+
+    await fs.writeFile(testFileName, j.toSource());
 
     // TODO: transformations:
-    // 1. Replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
-    // 2. Replace all usage of eval..
-    // 3. Identify pm.environment.get and pm.environment.set calls, and their scope, then declare
-    //    variables at an appropriate level (or don't and manually evaluate this stuff)
-    // 4. Identify pm.variables.get/set and create those variables with an appropriate scope in the
-    //    code.
-    // 5. Transform usages of setTimeout where it's the last call made in a given test. We can move
-    //    most of that usage to the third parameter in the `it` test block? E.g.
-    //    https://github.com/facebook/jest/issues/5055
-    // 6. Replace (some?) duplicated string values with variables. Might require analysis on a
-    //    case-by-case basis.
-    // 7. Wherever a request is made, set pm.response with the expected form. Else, if this proves
-    //    to be difficult, wherever a request is made, consider modifying the transform to wrap it
-    //    in a function that returns the expected form. I.e. modifying
-    //    axios-requestgen/lib/axios.js to return an IIFE like
-    //    pm.response = (() => { axios stuff returning the correct pm.response interface });
+    //  0. Replace all strings that are secretly template literal to be actual template literals.
+    //     Postman allows this:
+    //       pm.test("Currency is (${pm.environment.get('currency')")
+    //     That's secretly a template literal.
+    //     Note also that this is _intended_ to be a template literal, but the closing brace is not
+    //     present.
+    //     Further note this example of an invalid template literal:
+    //       pm.test("Transfer amount is ({pm.environment.get('amount')", function () {
+    //
+    //  1. Replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
+    //
+    //  2. Replace all usage of eval..
+    //
+    //  3. Identify pm.environment.get and pm.environment.set calls, and their scope, then declare
+    //     variables at an appropriate level (or don't and manually evaluate this stuff)
+    //
+    //  4. Identify pm.variables.get/set and create those variables with an appropriate scope in the
+    //     code.
+    //
+    //  5. Replace (some?) duplicated string values with variables. Might require analysis on a
+    //     case-by-case basis.
+    //
+    //  6. Wherever a request is made, set pm.response with the expected form.
+    //
+    //     Else, if this proves to be difficult, wherever a request is made, consider modifying the
+    //     transform to wrap it in a function that returns the expected form. I.e. modifying
+    //     axios-requestgen/lib/axios.js to return an IIFE like
+    //     pm.response = (() => { axios stuff returning the correct pm.response interface });
+    //
+    //     Or possibly modify axios-requestgen to return a recast AST instead of a snippet. (This
+    //     might actually be pretty easy to generate _from_ the snippet). Then mutate that.
+    //
+    //  7. Wherever pm.sendRequest is called, transform this to a 
+    //
+    //  8. Check for variables that look like they should be in a test data file/variable. For
+    //     example, variables that are duplicated in multiple places (e.g. every argument to
+    //     pm.sendRequest), declared const, never rewritten or modified.
+    //
+    //  9. Replace variables i.e. '{{HOST_CENTRAL_LEDGER}}' in requests with references to
+    //     `pm.environment` or `pm.variables` or whatever's appropriate.
+    //
+    // 10. Remove trailing whitespace
+    //
+    // 11. Hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
+    //
+    // 12. Convert all pm.sendRequest to axios using convertRequest
+    //
+    // 13. Convert all `var` usages to `let` or `const`?
+    //
+    // 14. Evaluate all (Mojaloop DFSP) transfers and make sure sufficient funds are supplied before
+    //     every transfer
+    //
+    // 15. Evaluate all raw values by identifying how often they're repeated and what they are.
+    //     This might be a case-by-case analysis and replacement. Some basic tools could be built
+    //     for this. E.g. "statistics: all raw values and the number of times they're repeated".
+    //     This would make identification of the low-hanging fruit easy.
+    //
+    // 16. Identify all similar variables, function calls, etc. by computing some sort of
+    //     similarity score. This might help identify factoring that can occur. However, it might
+    //     be super-obvious just by looking at the code.
+    //
+    // 17. Convert all
+    //       pm.test("Description", () => pm.expect(value).assertion);
+    //     to the simpler:
+    //       pm.expect(
+    //          value,
+    //          'Description'
+    //       ).assertion;
+    //
+    // 18. convert things like
+    //       let data = `{ "some": "${templateLiteral}", "templated": "json" }`
+    //     to data
+    //       let data = { some: templateLiteral, templated: "json" }
+    //
+    // 19. replace _all_ calls to pm.environment.get and pm.environment.set with global data
+    //     get/set.
 
     // Example:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
     // copy-pasted)
     // const decs = j
-    //     .find(jscodeshift.Identifier)
+    //     .find(jsc.Identifier)
     //     .filter(p => p.value.name.match(/^testfsp3GetStatusRequest$/))
     //     .getVariableDeclarators(path => path.value.name);
     // const nodes = decs.nodes();
     // assert(nodes.length > 1);
     // pp(nodes.length);
     // pp(astNodesAreEquivalent(nodes[0], nodes[1]));
-
-    // const result = jscodeshift(src)
-    //     .find(jscodeshift.Identifier)
-    //     // .filter((path) => (path.value.name === 'get'))
-    //     .filter((path) => (path.value.name === 'get' && path.parent.value.type === 'MemberExpression'))
-    //     .at(0)
-    //     .map((path) => {
-    //         pp(path.value.name);
-    //         pp(path.parent);
-    //         // pp(path.parent.value);
-    //         // pp(path.parent.value.object.object.name);
-    //         // pp(path.parent.value);
-    //         // path.value.name = 'HAHAHAHAHA';
-    //         // console.log(path.parentPath.value);
-    //         // Identifier name:
-    //         // console.log(path.value.name);
-    //     })
-    //     .toSource();
-    // console.log(result);
 })();

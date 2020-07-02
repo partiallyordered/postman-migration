@@ -45,9 +45,9 @@ const transformRequestToTest = async (item) => {
 const transformFolderToDescribe = async (item) => {
     const indent = '  ';
     return `
-describe('${item.name}', async () => {
+describe('${item.name}', () => {
 ${indent}${(await Promise.all(item.item.map(transformItem))).join(`\n${indent}`)}
-})`;
+});`;
 };
 
 const transformItem = async (item) => {

@@ -1,3 +1,5 @@
+const assert = require('assert').strict;
+const axios = require('axios');
 const expect = require('chai').expect;
 
 const globalDataLol = {};
@@ -23,6 +25,9 @@ const createPmSandbox = (reportsSpec) => {
         // In our case, we only ever call this as follows:
         //   pm.iterationData.get(\"reportsSpec\")
         // Therefore, we can implement this as: pm.iterationData.get -> require('./reportsSpec.json');
+        // In general, iteration data seems to come from the environment, either on the
+        // command-line (newman) or created with
+        // `pm.iterationData.set(key: string, value: any, type: string): function → void`
         iterationData: {
             get: () => reportsSpec
         },
@@ -44,7 +49,28 @@ const createPmSandbox = (reportsSpec) => {
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmsendrequest
         // The method accepts a collection SDK compliant request and a callback. The callback receives
         // two arguments, an error (if any) and an SDK-compliant response.
-        sendRequest: () => {},
+        sendRequest: async (request) => {
+            assert(
+                typeof request === 'object' && request.constructor === Object.prototype.constructor,
+                'This function was written to handle POJO requests. It may make some assumptions that the argument supplied violates'
+            );
+            assert(
+                request.method.match(/get/i),
+                'This function was only written to handle HTTP GET requests'
+            );
+
+            const config = {
+                method: request.method,
+                url: request.url,
+                headers: request.header,
+            };
+
+            console.log(config);
+
+            const result = await axios(config);
+
+            return { json: () => result.data };
+        },
 
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmtest
         // pm.test(testName:String, specFunction:Function):Function
