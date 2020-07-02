@@ -133,23 +133,7 @@ function makeSnippet (request, indentString, options) {
   snippet += ' config = {\n';
   snippet += configArray.join(',\n') + '\n';
   snippet += '};\n\n';
-  snippet += 'const resp = await axios(config)\n';
-  if (options.ES6_enabled) {
-    snippet += '.then((response) => {\n';
-  }
-  else {
-    snippet += '.then(function (response) {\n';
-  }
-  snippet += indentString + 'console.log(JSON.stringify(response.data));\n';
-  snippet += '})\n';
-  if (options.ES6_enabled) {
-    snippet += '.catch((error) => {\n';
-  }
-  else {
-    snippet += '.catch(function (error) {\n';
-  }
-  snippet += indentString + 'console.log(error);\n';
-  snippet += '});\n';
+  snippet += 'const resp = await axios(config);\n';
 
   return snippet;
 }
