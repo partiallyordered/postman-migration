@@ -9,7 +9,12 @@ const createPmSandbox = (reportsSpec) => {
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmenvironment
         environment: {
             // pm.environment.get(variableName:String):function → *
-            get: (keyStr) => globalDataLol[keyStr],
+            get: (keyStr) => {
+                if (keyStr in globalDataLol) {
+                    return globalDataLol[keyStr]
+                }
+                throw new Error(`Variable ${keyStr} not present in environment`);
+            },
             // pm.environment.set(variableName:String, variableValue:String):function
             set: (keyStr, val) => {
                 globalDataLol[keyStr] = val;
