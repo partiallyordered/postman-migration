@@ -196,22 +196,63 @@ Shortcomings of Postman:
 3. Code reuse is difficult and painful
     * it's difficult to factor repeated code into a function for reuse elsewhere in the tests
     * it's _more_ difficult to factor repeated code into a function for reuse outside the tests
-    * it's practically impossible to have two people develop the tests simultaneously then
-        reconcile their changes in version control
+    * it's practically impossible to have two people develop tests simultaneously then merge their
+        changes in version control
     * it's difficult and painful to incorporate shared code from elsewhere
+   This is a large part of the reason the tests we have are brittle, because it's tedious and
+   difficult to specify a wide range of system state for each test, because doing so would require
+   copying and pasting a lot of code. This rapidly introduces an unsustainable maintenance burden
+   (for Sri especially, who already doesn't have any time).
 4. No watch mode
 5. Not portable (as evidenced by this effort)- in contrast, test runners from npm often provide
    automatic conversion scripts. For example, the conversion of quoting service from ava to jest
    was a mostly-automatic job, with about thirty minutes of semi-manual work.
-6. Tooling and ecosystem is inferior.
+6. Tooling and ecosystem is inferior. One implication of this is that, if we want to embark on an
+   effort to improve our tests, we are limited to what Postman provides us. For example, it would
+   be futile to engage in an effort such as automatic rewriting. Similarly, if the performance or
+   execution time of our test suite needs work, we are limited to what Postman provides, which,
+   compared with the broader ecosystem, is a severe limitation indeed.
 7. This refactor effort indicates postman is not appropriate. Why is setTimeout always called with
-   the argument `2000`? Because everyone feels that `pm.environment.get` (mutable global state) is
-   bad and overkill. JS test runners have a _parameter_ for test timeout and "afterall",
-   "aftereach".
-8. Requires training
+   the literal argument `2000` instead of a variable? Because everyone feels that
+   `pm.environment.get` (mutable global state) is bad and overkill. JS test runners have a
+   _parameter_ for test timeout and "afterall", "aftereach". JS request libraries can be configured
+   per-instance or globally.
+8. Requires training. I.e.
+     - UI training
+     - What are variable scoping rules?
+     - How do I run "after" or "before" functions?
+     - How do I use Postman's assertion library?
+     - How do I share my work?
+   This isn't very valuable knowledge or experience, people are not interested as it is specific to
+   postman, it is not transferable, as standard js test runner and assertion library experience is.
 9. Enforces usage of a specific tool
 10. Output control, and run control in general is more limited
 11. Image- what other serious open source project uses postman for testing?
+12. Fails silently when variables, configuration, data are missing. E.g.
+    `pm.request({{MISSING_VARIABLE}})` does not produce an error indicating the variable is not
+    present, it simply proceeds.
+13. Postman is tedious to use. Want the latest tests?
+    1. Remove your current environment and test suite
+    2. Update them from their respective sources
+    3. Re-import them
+    4. Try to remember where you left off
+14. Postman is tedious to use. Where is a variable set?
+    1. Try the environment variables
+    2. Try to see if it's reset somewhere else
+    3. Just go hunting around because there's no modern search mechanism _like a plain-text search,
+       for example_.
+    4. Go on a mystical journey of discovery, to the depths of the postman mines.
+    5. Find yourself lost after spelunking deep within the labyrinth, your breadcrumbs washed away
+         by stray global data mutation.
+    6. As you become more desparate for intellectual sustenance, modify usage of a "postman
+         variable" in a request, making a typo and accidentally setting it to an invalid value, not
+         realising that postman will silently ignore your error.
+    7. Enter a trance, your mind flickering like star formation in a sparse gas nebula, your body a
+         sunken log in a peat bog.
+    8. Awake days later, unsure where you are or whether any of it really happened.
+    9. See a PR to the `test-scripts` repo and realise it's all real.
+    10. Despair. Ennui. Horror. Terror. Disgust.
+    11. Fin.
 Good features of Postman:
 1. Pleasant UI for running subsets of tests etc
 2. Some good aspects of test report output
