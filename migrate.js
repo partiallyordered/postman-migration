@@ -374,6 +374,19 @@ const createOrReplaceOutputDir = async (name) => {
             });
     };
 
+    // Replace all pm.response.code with resp.status
+    const replacePmResponseCode = (j) => j
+        .find(jsc.MemberExpression)
+        .filter((path) => jsc(path).toSource().match(/^pm.response.code$/))
+        .forEach((path) =>
+            path.replace(
+                jsc.memberExpression(
+                    jsc.identifier(axiosResponseVarName),
+                    jsc.identifier('status')
+                )
+            )
+        );
+
     // Replace all pm.response.json() with resp.data
     const replacePmResponseJson = (j) => j
         .find(jsc.CallExpression)
@@ -386,16 +399,14 @@ const createOrReplaceOutputDir = async (name) => {
                 )
             )
         );
-        // .forEach((path) => console.log(jsc(path).toSource()))
 
-    const identifyAllPmResponseUsage = (j) => j
+    const assertPmResponseIsReplaced = (j) => assert(0 === j
         .find(jsc.MemberExpression)
         .filter((path) =>
                path.value.object.type === 'Identifier'
             && path.value.property.type === 'Identifier'
             && path.value.object.name === 'pm'
             && path.value.property.name === 'response')
-        // .at(30)
         .map((path) => {
             // work upward until the parent is not a memberexpression or a callexpression
             let curr = path;
@@ -406,17 +417,8 @@ const createOrReplaceOutputDir = async (name) => {
             }
             return curr;
         })
-        .forEach((path) => {
-            // console.log(path);
-            // recast.print(path);
-            // use
-            // npm run transform | sort | uniq
-            console.log(jsc(path).toSource().replace('\n', ' '))
-        });
-        // .forEach((path) => console.log(summarise(path.value)))
-        // .forEach((path) => console.log(path.parentPath));
-        // .filter((path) => summarise(path.value).match(/^pm.response/))
-        // .forEach((path) => console.log(path));
+        .size()
+    );
 
     // assertPmHttpRequestsAreAllPojos(j);
     transformPmSendRequestToAsync(j);
@@ -424,9 +426,21 @@ const createOrReplaceOutputDir = async (name) => {
     promisifySetTimeout(j);
     replaceTestResponse(j);
     replacePmResponseJson(j);
-    identifyAllPmResponseUsage(j);
+    replacePmResponseCode(j);
+    assertPmResponseIsReplaced(j);
     replaceStringLiteralsWithPostmanEnvironment(j);
 
+    // Variables:
+    //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#variable-scopes
+    // Especially:
+    //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#choosing-variables
+    //
+    //   > Local variables are temporary, and only accessible in your request scripts. Local variable
+    //   > values are scoped to a single request or collection run, and are no longer available when
+    //   > the run is complete.
+    //
+    // i.e. pm.variables corresponds to one `it` block for us
+    //
     // can postman users use {{}} to access a variable set with pm.variables.set()?
     // how do we know whether to use pm.variables.get or pm.environment.get for {{}}?
     // is the environment persisted to the environment json file after a test run?
@@ -522,6 +536,13 @@ const createOrReplaceOutputDir = async (name) => {
     //          })
     //       })
     //     Output _could_ go to a file, if jest doesn't already send it there
+    //
+    // 21. Wherever possible, replace usage of pm.expect with chai expect, or jest expect
+    //
+    // 22. Replace usage of pm.expect or chai expect with jest expect
+    //
+    // 23. Print all `it()`, `describe()` descriptions to help identify duplication.
+    //     Print all request contents to help identify duplication.
 
     // Example:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
