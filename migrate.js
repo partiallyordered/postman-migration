@@ -3,7 +3,9 @@
 // - How to verify the transformation is correct?
 //   - Count assertions?
 //   - Count tests (i.e. `it` blocks)?
-// - _Make files_. The current file is way too big to run practically.
+// - _Make files_. The current file is way too big to run practically. Note that ast-types has a
+//    fileBuilder. This might be useful. (At the time of writing, I know nothing about it beyond
+//    its existence).
 // - _When the non-leaf nodes do not contain code_ the test structure can be reproduced as
 //    directories, or as `describe` blocks. This could probably be quite usefully configurable.
 // - Automatic rewriting:
@@ -45,21 +47,20 @@ const { transformCollection, convertRequest } = require('./transformCollection')
 const assert = require('assert').strict;
 const recast = require('recast');
 
+const axiosResponseVarName = 'resp';
 // TODO: convert this to ast-types? That way we can, for example, refer to setTimeoutPromiseName as
 // a node, rather than a string.
 const setTimeoutPromiseName = 'setTimeoutPromise';
-const preamble = `
-const axios = require('axios');
-const uuid = require('uuid');
-const { createPmSandbox } = require('./pm');
-const pm = createPmSandbox({});
-const { promisify } = require('util');
-const ${setTimeoutPromiseName} = promisify(setTimeout);
-const pmEnv = require('../environments/Casa-DEV.postman_environment.json')
-    .values
-    .filter(v => v.enabled);
-pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));
-`;
+const preamble = [
+    'const axios = require(\'axios\');',
+    'const uuid = require(\'uuid\');',
+    'const { createPmSandbox } = require(\'./pm\');',
+    'const pm = createPmSandbox({});',
+    'const { promisify } = require(\'util\');',
+    `const ${setTimeoutPromiseName} = promisify(setTimeout);`,
+    'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
+    'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
+].join('\n');
 
 const createOrReplaceOutputDir = async (name) => {
     await fs.rmdir(name, { recursive: true }).catch(() => {}); // ignore error
@@ -92,9 +93,9 @@ const createOrReplaceOutputDir = async (name) => {
     // Usage: astNodesAreEquivalent(path1.value, path2.value)
     const astNodesAreEquivalent = recast.types.astNodesAreEquivalent;
 
+    // TODO: performance: this function is fairly slow
     const callExpressionMatching = (regex) => (astPath) => {
-        const { start, end } = astPath.value.callee;
-        const call = src.slice(start, end);
+        const call = jsc(astPath.get('callee')).toSource();
         return call.match(regex);
     };
 
@@ -264,7 +265,7 @@ const createOrReplaceOutputDir = async (name) => {
     const promisifySetTimeout = (j) => j
         .find(jsc.CallExpression)
         .filter(callExpressionMatching(/^setTimeout$/))
-        // .at(0)
+        // .filter((path) => path.value.callee.type === 'Identifier' && path.value.callee.name === 'setTimeout')
         .forEach((path) => {
             let [f, timeout] = path.value.arguments;
             f.async = true;
@@ -291,38 +292,146 @@ const createOrReplaceOutputDir = async (name) => {
         )
         // .at(0)
         .forEach((path) => {
-            // console.log('{{abc}}{{def}}'.replace(/{{([^}]+)}}/g, '`${pm.environment.get($1)}`'));
             const newStr = path.value.value.replace(/{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}');
             const newCode = `\`${newStr}\``;
-            const newValue = jsc(newCode).getAST()[0].value;
-            // console.log(newValue);
-            // console.log(newCode);
-            // const k = jsc(newCode);
-            // const k = jsc(newCode).getAST();
-            path.replace(newValue);
-            // console.log(k);
-            // pp(summarise(path.value));
-            // path.replace(
-            //     jsc.expressionStatement(
-            //         jsc.templateLiteral(
-            //
-            //         )
-            //     )
-            // )
-            // console.log(path);
+            const newNode = jsc(newCode).getAST()[0].value;
+            path.replace(newNode);
         });
+
+    // Replace this pattern:
+    // pm.test("Status code is blah", function () {
+    //   pm.response.to.have.status(200);
+    // });
+    const replaceTestResponse = (j) => {
+        // Utilities
+        const testResponsePattern = (desc, code) =>
+            jsc.callExpression(
+                jsc.memberExpression(
+                    jsc.identifier('pm'),
+                    jsc.identifier('test'),
+                ),
+                [
+                    jsc.literal(desc),
+                    jsc.functionExpression(
+                        null,
+                        [],
+                        jsc.blockStatement([
+                            jsc.expressionStatement(
+                                jsc.callExpression(
+                                    jsc.memberExpression(
+                                        jsc.memberExpression(
+                                            jsc.memberExpression(
+                                                jsc.memberExpression(
+                                                    jsc.identifier('pm'),
+                                                    jsc.identifier('response'),
+                                                ),
+                                                jsc.identifier('to'),
+                                            ),
+                                            jsc.identifier('have'),
+                                        ),
+                                        jsc.identifier('status')
+                                    ),
+                                    [jsc.literal(code)]
+                                )
+                            )
+                        ])
+                    )
+                ]
+            );
+
+        const signatureMatches = (path) =>
+            path.value.arguments.length === 2
+                && path.value.arguments[0].type === 'Literal'
+                && path.value.arguments[1].body.body
+                && path.value.arguments[1].body.body.length === 1
+                && jsc(path.value.arguments[1].body.body).toSource().match(/^pm.response.to.have.status\(\d+\);?$/);
+
+        j.find(jsc.CallExpression)
+            .filter(callExpressionMatching(/^pm.test$/))
+            .filter(signatureMatches)
+            .forEach((path) => {
+                const desc = path.value.arguments[0].value;
+                const code = path.value.arguments[1].body.body[0].expression.arguments[0].value;
+                // Do this check here rather than in a filter because it's probably expensive.
+                if (astNodesAreEquivalent(path.value, testResponsePattern(desc, code))) {
+                    path.replace(
+                        jsc.callExpression(
+                            jsc.identifier('assert'),
+                            [
+                                jsc.binaryExpression(
+                                    "===",
+                                    jsc.memberExpression(
+                                        jsc.identifier(axiosResponseVarName), // TODO: gotta determine what this value ("resp") actually is, or use jscodeshift to generate or analyse the axios response identifier
+                                        jsc.identifier('status')
+                                    ),
+                                    jsc.literal(code)
+                                ),
+                                jsc.literal(desc)
+                            ]
+                        )
+                    )
+                }
+            });
+    };
+
+    // Replace all pm.response.json() with resp.data
+    const replacePmResponseJson = (j) => j
+        .find(jsc.CallExpression)
+        .filter((path) => jsc(path).toSource().match(/^pm.response.json\(\)$/))
+        .forEach((path) =>
+            path.replace(
+                jsc.memberExpression(
+                    jsc.identifier(axiosResponseVarName),
+                    jsc.identifier('data')
+                )
+            )
+        );
+        // .forEach((path) => console.log(jsc(path).toSource()))
+
+    const identifyAllPmResponseUsage = (j) => j
+        .find(jsc.MemberExpression)
+        .filter((path) =>
+               path.value.object.type === 'Identifier'
+            && path.value.property.type === 'Identifier'
+            && path.value.object.name === 'pm'
+            && path.value.property.name === 'response')
+        // .at(30)
+        .map((path) => {
+            // work upward until the parent is not a memberexpression or a callexpression
+            let curr = path;
+            let parent = path.parentPath;
+            while (parent.value.type === 'MemberExpression' || parent.value.type === 'CallExpression') {
+                curr = parent;
+                parent = curr.parentPath;
+            }
+            return curr;
+        })
+        .forEach((path) => {
+            // console.log(path);
+            // recast.print(path);
+            // use
+            // npm run transform | sort | uniq
+            console.log(jsc(path).toSource().replace('\n', ' '))
+        });
+        // .forEach((path) => console.log(summarise(path.value)))
+        // .forEach((path) => console.log(path.parentPath));
+        // .filter((path) => summarise(path.value).match(/^pm.response/))
+        // .forEach((path) => console.log(path));
 
     // assertPmHttpRequestsAreAllPojos(j);
     transformPmSendRequestToAsync(j);
     // assertSetTimeoutCalledWithTwoArgs(j);
     promisifySetTimeout(j);
+    replaceTestResponse(j);
+    replacePmResponseJson(j);
+    identifyAllPmResponseUsage(j);
     replaceStringLiteralsWithPostmanEnvironment(j);
 
     // can postman users use {{}} to access a variable set with pm.variables.set()?
     // how do we know whether to use pm.variables.get or pm.environment.get for {{}}?
     // is the environment persisted to the environment json file after a test run?
 
-    await fs.writeFile(testFileName, j.toSource());
+    await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
     // TODO: transformations:
     //  0. Replace all strings that are secretly template literal to be actual template literals.
@@ -401,6 +510,18 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // 19. replace _all_ calls to pm.environment.get and pm.environment.set with global data
     //     get/set.
+    //
+    // 20. Consider replacing all console.log calls to structured log calls. This shouldn't be too
+    //     difficult:
+    //       const testLogTag = []
+    //       describe('blah', () => {
+    //          testLogTag.push('blah');
+    //          it('some test name', () => {
+    //              testLogTag.push('some test name');
+    //              logger(testLogTag, 'message here');
+    //          })
+    //       })
+    //     Output _could_ go to a file, if jest doesn't already send it there
 
     // Example:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
