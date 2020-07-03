@@ -65,8 +65,6 @@ const createPmSandbox = (reportsSpec) => {
                 headers: request.header,
             };
 
-            console.log(config);
-
             const result = await axios(config);
 
             return { json: () => result.data };
@@ -79,7 +77,9 @@ const createPmSandbox = (reportsSpec) => {
         //   pm.test($description, function innerTest() => { pm.expect($whatever) })
         // to:
         //   pm.expect($whatever, $description);
-        test: (testName, specFunction) => {},
+        test: (testName, specFunction) => {
+            specFunction();
+        },
         testSkip: (testName, specFunction) => {},
         // We do use this a few times, we'll assign it below :(
         // pm.test.skip: (testName, specFunction) => {},
