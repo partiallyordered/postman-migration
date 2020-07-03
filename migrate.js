@@ -3,7 +3,7 @@
 // - How to verify the transformation is correct?
 //   - Count assertions?
 //   - Count tests (i.e. `it` blocks)?
-// - _Make files_. The current file is way too big to run practically. Note that ast-types has a
+// - _Create files_. The current file is way too big to run practically. Note that ast-types has a
 //    fileBuilder. This might be useful. (At the time of writing, I know nothing about it beyond
 //    its existence).
 // - _When the non-leaf nodes do not contain code_ the test structure can be reproduced as
@@ -37,6 +37,10 @@
 //   in package.json.
 //   This is because: https://stackoverflow.com/a/42678578
 //   Solution: https://stackoverflow.com/a/44366115
+// - Note the way that pm.test produces structure in the test output. Does/can jest do this in its
+//   structured or html output?
+// - is the environment persisted to the environment json file after a test run? Do we care?
+// - comments: https://gitter.im/benjamn/recast?at=56b3e93625142e764dfd0615
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
@@ -94,10 +98,22 @@ const createOrReplaceOutputDir = async (name) => {
     const astNodesAreEquivalent = recast.types.astNodesAreEquivalent;
 
     // TODO: performance: this function is fairly slow
+    // TODO: this should probably either incorporate the .find method, so the user does not have to
+    //       say j.find(jsc.CallExpression).filter(callExpressionMatching) _or_ it should be
+    //       registered on Collection (see the jscodeshift docs, or src/collections/ in the
+    //       jscodeshift source code).
     const callExpressionMatching = (regex) => (astPath) => {
         const call = jsc(astPath.get('callee')).toSource();
         return call.match(regex);
     };
+
+    // Given an array of strings, construct a nested MemberExpression AST left-to-right. e.g.
+    // jscodeshift(buildNestedMemberExpression(['assert', 'equal'])).toSource() -> 'assert.equal'
+    const buildNestedMemberExpression = (members) =>
+        members.reduce((acc, val) => jsc.memberExpression(
+            typeof acc === 'string' ? jsc.identifier(acc) : acc,
+            jsc.identifier(val))
+        );
 
     // Print the source code of a given expression
     const summarise = (astValue) => {
@@ -105,6 +121,7 @@ const createOrReplaceOutputDir = async (name) => {
         const { start, end } = astValue;
         return `[${getPos(astValue)}]: ${src.slice(start, end)}`;
     };
+
 
     // Ensure all pm.sendRequest calls are HTTP GET requests made with a POJO as the first
     // argument.
@@ -123,7 +140,7 @@ const createOrReplaceOutputDir = async (name) => {
         //   pm.sendRequest(requestToSimulator, ...)
         // NOT:
         //   pm.sendRequest('simulator', ...)
-        assert(firstArgs.every((path) => path.value.type === 'Identifier'));
+        assert(firstArgs.every((path) => jsc.Identifier.check(path.value)));
 
         // Some analysis of the first argument to pm.sendRequest:
         firstArgs.forEach((path) => {
@@ -146,7 +163,7 @@ const createOrReplaceOutputDir = async (name) => {
             // Luckily for us, it turns out that our tests don't overwrite variables like this, because
             // that would make this exercise more difficult.
             assert(
-                declarations.every((path) => path.value.init.type === 'ObjectExpression'),
+                declarations.every((path) => jsc.ObjectExpression.check(path.value.init)),
                 'Every declaration of every first argument to pm.sendRequest is a POJO assignment'
             );
 
@@ -166,12 +183,13 @@ const createOrReplaceOutputDir = async (name) => {
                 // define the value.
                 const assignedValue = methods[methods.length - 1].get('value');
                 assert(
-                    assignedValue.value.type === 'Literal' && assignedValue.value.value.match(/get/i),
+                    jsc.Literal.check(assignedValue.value) && assignedValue.value.value.match(/get/i),
                     'Every `method` value is a string literal `\'get\'`.'
                 );
             });
         });
     };
+
 
     // Transform all pm.sendRequest calls to async. This is because "pre-request", "request", and
     // "test" stages are no longer controlled to be run separately. Because we won't _check_ that
@@ -234,7 +252,7 @@ const createOrReplaceOutputDir = async (name) => {
                 jsc.blockStatement([
                     // Roughly: const response = pm.sendRequest(request);
                     jsc.variableDeclaration(
-                        "const",
+                        'const',
                         [
                             jsc.variableDeclarator(
                                 f.params[1],
@@ -254,18 +272,20 @@ const createOrReplaceOutputDir = async (name) => {
         });
     };
 
+
     const assertSetTimeoutCalledWithTwoArgs = (j) => assert(
         j.find(jsc.CallExpression)
         .filter(callExpressionMatching(/^setTimeout$/))
         .every((path) => path.value.arguments.length === 2)
     );
 
+
     // setTimeout is being called within an async function. Therefore, we promisify it according to
     // https://nodejs.org/api/timers.html#timers_settimeout_callback_delay_args
     const promisifySetTimeout = (j) => j
         .find(jsc.CallExpression)
         .filter(callExpressionMatching(/^setTimeout$/))
-        // .filter((path) => path.value.callee.type === 'Identifier' && path.value.callee.name === 'setTimeout')
+        // .filter((path) => jsc.Identifier.check(path.value.callee) && path.value.callee.name === 'setTimeout')
         .forEach((path) => {
             let [f, timeout] = path.value.arguments;
             f.async = true;
@@ -285,18 +305,149 @@ const createOrReplaceOutputDir = async (name) => {
             )
         });
 
+
+    // Variables:
+    //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#variable-scopes
+    // Especially:
+    //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#choosing-variables
+    //
+    //   > Local variables are temporary, and only accessible in your request scripts. Local variable
+    //   > values are scoped to a single request or collection run, and are no longer available when
+    //   > the run is complete.
+    //
+    // i.e. pm.variables corresponds to one `it` block for us
+    //
+    // Replace all instances of `pm.variables.set` and `pm.variables.get`. Do this by starting at
+    // `it` blocks, looking inside them for instances of `pm.variables.set`. Replace all postman
+    // variables, e.g. '{{var_name}}' and `pm.variables.get` instances with variable references,
+    // e.g. `locals.var_name` and all `pm.variables.set` instances with variable assignments.
+    const localsVarName = 'locals';
+    const replaceVariableUsage = (j) => j
+        .find(jsc.CallExpression)
+        .filter((p) => jsc.Identifier.check(p.value.callee))
+        .filter((p) => /^it$/.test(p.value.callee.name))
+        // .at(39)
+        // .forEach((p) => console.log(jsc(p).toSource()))
+        .forEach((itCallExpression) => {
+            // For each `pm.variables.set` in the `it` call, get all postman variable literals and
+            // `pm.variables.get` and replace them with `locals.VAR_NAME`
+            let varNames = new Set();
+            jsc(itCallExpression)
+                .find(jsc.CallExpression)
+                .filter((p) => astNodesAreEquivalent(
+                    p.value.callee,
+                    buildNestedMemberExpression(['pm', 'variables', 'set'])
+                ))
+                .forEach((pmVarSetCallExpression) => {
+                    assert(
+                        jsc.Literal.check(pmVarSetCallExpression.value.arguments[0]),
+                        'Expected first argument to pm.variables.set to be a string literal'
+                    );
+                    assert(
+                        pmVarSetCallExpression.value.arguments.length === 2,
+                        'Expected pm.variables.set to have exactly two arguments'
+                    );
+                    const varName = pmVarSetCallExpression.value.arguments[0].value;
+                    // Replace the `pm.variables.set` call with a variable assignment
+                    const varAssignment = jsc.assignmentExpression(
+                        "=",
+                        jsc.memberExpression(
+                            jsc.identifier(localsVarName),
+                            jsc.identifier(varName)
+                        ),
+                        pmVarSetCallExpression.value.arguments[1]
+                    );
+                    varNames.add(pmVarSetCallExpression.value.arguments[1].name);
+                    pmVarSetCallExpression.replace(varAssignment);
+                });
+
+            // insert the `locals` object at the beginning of the `it` callback function statement
+            // block.
+            // E.g.
+            //   it('blah', () => {
+            //     // stuff
+            //   })
+            // to
+            //   it('blah', () => {
+            //     let locals = {};
+            //   })
+            itCallExpression.get('arguments').get('1').get('body').get('body').get('0').insertBefore(
+                jsc.variableDeclaration(
+                    'let',
+                    [
+                        jsc.variableDeclarator(
+                            jsc.identifier(localsVarName),
+                            jsc.objectExpression([])
+                        )
+                    ]
+                )
+            );
+
+            // For each `pm.variables.get` in the `it` call, replace it with a variable reference.
+            // From:
+            //   pm.variables.get('var_name')
+            // to
+            //   locals.var_name
+            jsc(itCallExpression)
+                .find(jsc.CallExpression)
+                .filter((p) => astNodesAreEquivalent(
+                    p.value.callee,
+                    buildNestedMemberExpression(['pm', 'variables', 'get'])
+                ))
+                .forEach((pmVarGetCallExpression) => {
+                    assert(
+                        jsc.Literal.check(pmVarGetCallExpression.value.arguments[0]),
+                        'Expected first argument to  pm.variables.set to be a string literal'
+                    );
+                    assert(
+                        pmVarGetCallExpression.value.arguments.length === 1,
+                        'Expected pm.variables.get to have exactly two arguments'
+                    );
+                    const varName = pmVarGetCallExpression.value.arguments[0].value;
+                    pmVarGetCallExpression.replace(
+                        jsc.memberExpression(
+                            jsc.identifier(localsVarName),
+                            jsc.identifier(varName)
+                        )
+                    );
+                });
+
+            // Get all string literals in the `it` CallExpression and replace instances of
+            // {{var_name}} that we've identified as being local postman variables. Also replace
+            // the string literals with template strings where relevant.
+            jsc(itCallExpression)
+                .find(jsc.Literal)
+                .filter((path) =>
+                       typeof path.value.value === 'string'
+                    && [...varNames].some(varName => (new RegExp(`{{${varName}}}`)).test(path.value.value))
+                )
+                .forEach((path) => {
+                    // console.log([...varNames]);
+                    // console.log(path.value.value);
+                    const newStr = [...varNames.values()].reduce((pv, varName) => pv.replace(
+                        new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
+                    ), path.value.value);
+                    // console.log(newStr);
+                    const newCode = `\`${newStr}\``;
+                    const newNode = jsc(newCode).getAST()[0].value;
+                    // console.log(newCode);
+                    path.replace(newNode);
+                })
+        })
+
+
     const replaceStringLiteralsWithPostmanEnvironment = (j) => j
         .find(jsc.Literal)
         .filter(
             (path) => typeof path.value.value === 'string' && path.value.value.match(/{{[^}]+}}/)
         )
-        // .at(0)
         .forEach((path) => {
             const newStr = path.value.value.replace(/{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}');
             const newCode = `\`${newStr}\``;
             const newNode = jsc(newCode).getAST()[0].value;
             path.replace(newNode);
         });
+
 
     // Replace this pattern:
     // pm.test("Status code is blah", function () {
@@ -318,19 +469,7 @@ const createOrReplaceOutputDir = async (name) => {
                         jsc.blockStatement([
                             jsc.expressionStatement(
                                 jsc.callExpression(
-                                    jsc.memberExpression(
-                                        jsc.memberExpression(
-                                            jsc.memberExpression(
-                                                jsc.memberExpression(
-                                                    jsc.identifier('pm'),
-                                                    jsc.identifier('response'),
-                                                ),
-                                                jsc.identifier('to'),
-                                            ),
-                                            jsc.identifier('have'),
-                                        ),
-                                        jsc.identifier('status')
-                                    ),
+                                    buildNestedMemberExpression(['pm', 'response', 'to', 'have', 'status']),
                                     [jsc.literal(code)]
                                 )
                             )
@@ -341,7 +480,7 @@ const createOrReplaceOutputDir = async (name) => {
 
         const signatureMatches = (path) =>
             path.value.arguments.length === 2
-                && path.value.arguments[0].type === 'Literal'
+                && jsc.Literal.check(path.value.arguments[0])
                 && path.value.arguments[1].body.body
                 && path.value.arguments[1].body.body.length === 1
                 && jsc(path.value.arguments[1].body.body).toSource().match(/^pm.response.to.have.status\(\d+\);?$/);
@@ -403,23 +542,36 @@ const createOrReplaceOutputDir = async (name) => {
     const assertPmResponseIsReplaced = (j) => assert(0 === j
         .find(jsc.MemberExpression)
         .filter((path) =>
-               path.value.object.type === 'Identifier'
-            && path.value.property.type === 'Identifier'
+               jsc.Identifier.check(path.value.object)
+            && jsc.Identifier.check(path.value.property)
             && path.value.object.name === 'pm'
             && path.value.property.name === 'response')
         .map((path) => {
             // work upward until the parent is not a memberexpression or a callexpression
             let curr = path;
-            let parent = path.parentPath;
-            while (parent.value.type === 'MemberExpression' || parent.value.type === 'CallExpression') {
-                curr = parent;
-                parent = curr.parentPath;
+            while (jsc.MemberExpression.check(curr.parentPath.value) || jsc.CallExpression.check(curr.parentPath.value)) {
+                curr = curr.parentPath;
             }
             return curr;
         })
         .size()
     );
 
+    // FIRST:
+    // handle pm.environment.get calls
+    // Because this exists in the code (at line 2527):
+    // pm.variables.set('startTime', startTime)
+    // const config = { url: `${pm.environment.get('startTime')}` }
+    // Specifically, when replacing environment variables, it's better to:
+    //
+    // Get all `it` calls
+    // Within each of those, get all `pm.variables.get/set` calls and hoist a variable to the top
+    // of the `it` scope
+    // Now replace all instances of `pm.variables.get/set` with an assignment or expression
+    // containing its argument.
+
+    // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
+    // affect the result.
     // assertPmHttpRequestsAreAllPojos(j);
     transformPmSendRequestToAsync(j);
     // assertSetTimeoutCalledWithTwoArgs(j);
@@ -428,22 +580,9 @@ const createOrReplaceOutputDir = async (name) => {
     replacePmResponseJson(j);
     replacePmResponseCode(j);
     assertPmResponseIsReplaced(j);
+    replaceVariableUsage(j);
+    assertPmVariablesAreGone(j);
     replaceStringLiteralsWithPostmanEnvironment(j);
-
-    // Variables:
-    //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#variable-scopes
-    // Especially:
-    //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#choosing-variables
-    //
-    //   > Local variables are temporary, and only accessible in your request scripts. Local variable
-    //   > values are scoped to a single request or collection run, and are no longer available when
-    //   > the run is complete.
-    //
-    // i.e. pm.variables corresponds to one `it` block for us
-    //
-    // can postman users use {{}} to access a variable set with pm.variables.set()?
-    // how do we know whether to use pm.variables.get or pm.environment.get for {{}}?
-    // is the environment persisted to the environment json file after a test run?
 
     await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
@@ -463,6 +602,14 @@ const createOrReplaceOutputDir = async (name) => {
     //
     //  3. Identify pm.environment.get and pm.environment.set calls, and their scope, then declare
     //     variables at an appropriate level (or don't and manually evaluate this stuff)
+    //     One possibility might be to
+    //     1. evaluate whether these variables pre-exist in the environment config
+    //     2. if they do, analyse whether they are ever _set_
+    //        - are these persisted?
+    //     3. evaluate whether they are set strictly _before_ they are used (IOW, they probably
+    //        only exist to share data between tests)
+    //     3. if they do not pre-exist, hoist the appropriate get/set calls to the lowest shared
+    //        scope (probably a `declare` block in most cases.)
     //
     //  4. Identify pm.variables.get/set and create those variables with an appropriate scope in the
     //     code.
@@ -543,6 +690,12 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // 23. Print all `it()`, `describe()` descriptions to help identify duplication.
     //     Print all request contents to help identify duplication.
+    //
+    // 24. Do some analysis of whether certain (especially environment) variables are actually
+    //     used.
+    //
+    // 25. Check for any promise assignments that are not awaited. For example, some of our new
+    //     functionality is async, replacing functionality that was previously synchronous.
 
     // Example:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
