@@ -55,24 +55,47 @@ const createPmSandbox = (reportsSpec) => {
         // The method accepts a collection SDK compliant request and a callback. The callback receives
         // two arguments, an error (if any) and an SDK-compliant response.
         sendRequest: async (request) => {
+            // https://github.com/postmanlabs/postman-collection/blob/8895878ad81422b95124974bc5b76fbfdf29b800/lib/collection/request.js#L101-L104
             assert(
-                typeof request === 'object' && request.constructor === Object.prototype.constructor,
-                'This function was written to handle POJO requests. It may make some assumptions that the argument supplied violates'
+                   typeof request === 'string'
+                || typeof request === 'object' && request.constructor === Object.prototype.constructor,
+                'This function was written to handle POJO or string requests. It may make some assumptions that the argument supplied violates'
             );
             assert(
-                request.method.match(/get/i),
+                typeof request === 'string' || /get/i.test(request.method),
                 'This function was only written to handle HTTP GET requests'
             );
 
-            const config = {
-                method: request.method,
-                url: request.url,
-                headers: request.header,
-            };
+            // TODO: default or managed authorisation? Could pass authorisation config into the
+            // sandbox create function something like this:
+            //   createPmSandbox({
+            //     auth: {
+            //       'example.com': { bearer: 'hello' },
+            //       'google.com': { basic: { username: 'user', password: 'secretaf' } },
+            //     },
+            //   });
+            // Check the axios-requestgen/lib/parseRequest.js file for examples of handling each of
+            // these types of auth.
+            const headers = request.header || undefined;
+
+            const config = typeof request === 'string'
+                ? {
+                    method: 'get',
+                    url: request,
+                    headers,
+                }
+                : {
+                    method: request.method,
+                    url: request.url,
+                    headers,
+                };
 
             const result = await axios(config);
 
-            return { json: () => result.data };
+            return {
+                ...result,
+                json: () => result.data,
+            };
         },
 
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmtest
