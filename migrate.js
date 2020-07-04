@@ -321,6 +321,8 @@ const createOrReplaceOutputDir = async (name) => {
     // `it` blocks, looking inside them for instances of `pm.variables.set`. Replace all postman
     // variables, e.g. '{{var_name}}' and `pm.variables.get` instances with variable references,
     // e.g. `locals.var_name` and all `pm.variables.set` instances with variable assignments.
+    //
+    // Also, replace all remaining usage of `{{var_name}}` with pm.environment.get('var_name').
     const localsVarName = 'locals';
     const replaceVariableUsage = (j) => j
         .find(jsc.CallExpression)
@@ -412,41 +414,35 @@ const createOrReplaceOutputDir = async (name) => {
                     );
                 });
 
-            // Get all string literals in the `it` CallExpression and replace instances of
-            // {{var_name}} that we've identified as being local postman variables. Also replace
-            // the string literals with template strings where relevant.
+            // Get all string literals in the `it` CallExpression and
+            // 1. replace instances of {{var_name}} that we've identified as being local postman
+            //    variables
+            // 2. replace other instances of {{var_name}} with pm.environment.get calls
+            // 3. replace the string literals with template strings where we make the above
+            //    replacements
             jsc(itCallExpression)
                 .find(jsc.Literal)
                 .filter((path) =>
-                       typeof path.value.value === 'string'
-                    && [...varNames].some(varName => (new RegExp(`{{${varName}}}`)).test(path.value.value))
+                    typeof path.value.value === 'string' && path.value.value.match(/{{[^}]+}}/)
+                    //    typeof path.value.value === 'string'
+                    // && [...varNames].some(varName => (new RegExp(`{{${varName}}}`)).test(path.value.value))
                 )
                 .forEach((path) => {
-                    // console.log([...varNames]);
-                    // console.log(path.value.value);
-                    const newStr = [...varNames.values()].reduce((pv, varName) => pv.replace(
-                        new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
-                    ), path.value.value);
-                    // console.log(newStr);
+                    // If there is a variable that is set by pm.variables.set('var_name'), we'll
+                    // replace it with locals.var_name
+                    // All other variables we'll replace with instances of pm.environment.get
+                    const newStr = [...varNames.values()]
+                        .reduce((pv, varName) => pv.replace(
+                            new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
+                        ), path.value.value)
+                        .replace(
+                            /{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}'
+                        )
                     const newCode = `\`${newStr}\``;
                     const newNode = jsc(newCode).getAST()[0].value;
-                    // console.log(newCode);
                     path.replace(newNode);
                 })
         })
-
-
-    const replaceStringLiteralsWithPostmanEnvironment = (j) => j
-        .find(jsc.Literal)
-        .filter(
-            (path) => typeof path.value.value === 'string' && path.value.value.match(/{{[^}]+}}/)
-        )
-        .forEach((path) => {
-            const newStr = path.value.value.replace(/{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}');
-            const newCode = `\`${newStr}\``;
-            const newNode = jsc(newCode).getAST()[0].value;
-            path.replace(newNode);
-        });
 
 
     // Replace this pattern:
@@ -557,19 +553,6 @@ const createOrReplaceOutputDir = async (name) => {
         .size()
     );
 
-    // FIRST:
-    // handle pm.environment.get calls
-    // Because this exists in the code (at line 2527):
-    // pm.variables.set('startTime', startTime)
-    // const config = { url: `${pm.environment.get('startTime')}` }
-    // Specifically, when replacing environment variables, it's better to:
-    //
-    // Get all `it` calls
-    // Within each of those, get all `pm.variables.get/set` calls and hoist a variable to the top
-    // of the `it` scope
-    // Now replace all instances of `pm.variables.get/set` with an assignment or expression
-    // containing its argument.
-
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
     // assertPmHttpRequestsAreAllPojos(j);
@@ -582,7 +565,6 @@ const createOrReplaceOutputDir = async (name) => {
     assertPmResponseIsReplaced(j);
     replaceVariableUsage(j);
     assertPmVariablesAreGone(j);
-    replaceStringLiteralsWithPostmanEnvironment(j);
 
     await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
