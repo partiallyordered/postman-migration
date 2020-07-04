@@ -445,6 +445,22 @@ const createOrReplaceOutputDir = async (name) => {
         })
 
 
+    // Assert the removal of all instances of `pm.variables`
+    const assertPmVariablesGone = (j) => assert(
+        0 === j
+            .find(jsc.MemberExpression)
+            .filter((path) => astNodesAreEquivalent(
+                path.value,
+                jsc.memberExpression(
+                    jsc.identifier('pm'),
+                    jsc.identifier('variables')
+                )
+            ))
+            .length,
+        'Expected all pm.variables usage to be removed'
+    );
+
+
     // Replace this pattern:
     // pm.test("Status code is blah", function () {
     //   pm.response.to.have.status(200);
@@ -564,7 +580,7 @@ const createOrReplaceOutputDir = async (name) => {
     replacePmResponseCode(j);
     assertPmResponseIsReplaced(j);
     replaceVariableUsage(j);
-    assertPmVariablesAreGone(j);
+    assertPmVariablesGone(j);
 
     await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
