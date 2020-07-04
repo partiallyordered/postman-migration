@@ -41,6 +41,15 @@
 //   structured or html output?
 // - is the environment persisted to the environment json file after a test run? Do we care?
 // - comments: https://gitter.im/benjamn/recast?at=56b3e93625142e764dfd0615
+// - set a request timeout (axios parameter)
+// - set a per-test timeout (jest parameter)
+// - better handle axios request errors?
+// - Only print a whole load of shit when the test fails? Not when it succeeds? Or can Jest handle
+//   output more cleverly, structuring it per-test or something?
+
+// Notes:
+// - Jest execution order:
+//   https://jestjs.io/docs/en/setup-teardown#order-of-execution-of-describe-and-test-blocks
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
@@ -56,6 +65,7 @@ const axiosResponseVarName = 'resp';
 // a node, rather than a string.
 const setTimeoutPromiseName = 'setTimeoutPromise';
 const preamble = [
+    'const assert = require(\'assert\').strict;',
     'const axios = require(\'axios\');',
     'const uuid = require(\'uuid\');',
     'const { createPmSandbox } = require(\'./pm\');',
@@ -90,6 +100,7 @@ const createOrReplaceOutputDir = async (name) => {
     const j = jsc(src);
     const testCmd = require('./package.json').scripts.test.split(' ');
     const testFileName = testCmd[testCmd.length - 1];
+    fs.writeFile(`${testFileName.replace(/\.js$/, '-precodemod.js')}`, src);
 
     // Check node equivalence. Useful for determining whether two variables have the same definition.
     // Next: write something to determine the lowest shared scope. Seems `path` types have a `.scope`
@@ -359,7 +370,7 @@ const createOrReplaceOutputDir = async (name) => {
                         ),
                         pmVarSetCallExpression.value.arguments[1]
                     );
-                    varNames.add(pmVarSetCallExpression.value.arguments[1].name);
+                    varNames.add(pmVarSetCallExpression.value.arguments[0].value);
                     pmVarSetCallExpression.replace(varAssignment);
                 });
 
@@ -424,8 +435,6 @@ const createOrReplaceOutputDir = async (name) => {
                 .find(jsc.Literal)
                 .filter((path) =>
                     typeof path.value.value === 'string' && path.value.value.match(/{{[^}]+}}/)
-                    //    typeof path.value.value === 'string'
-                    // && [...varNames].some(varName => (new RegExp(`{{${varName}}}`)).test(path.value.value))
                 )
                 .forEach((path) => {
                     // If there is a variable that is set by pm.variables.set('var_name'), we'll
@@ -435,6 +444,12 @@ const createOrReplaceOutputDir = async (name) => {
                         .reduce((pv, varName) => pv.replace(
                             new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
                         ), path.value.value)
+                        // TODO: we should read in the environment file and check every instance of
+                        // `pm.environment.set` preceding the variables here. Then, if the variable has
+                        // been set either by the environment file or by `pm.environment.set`, we
+                        // should replace it. Otherwise, we should not. Wherever there is something
+                        // that _looks_ like a variable, but we can't replace it, we should print a
+                        // warning to the user.
                         .replace(
                             /{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}'
                         )
@@ -551,6 +566,95 @@ const createOrReplaceOutputDir = async (name) => {
             )
         );
 
+    // Remove response.responseSize, because there's going to be an error if the response fails and
+    // we'll just leave it at that.
+    // Note that every time this is used it's a guard for tests, thus:
+    //   if (response.responseSize !== 0) {
+    //     // tests
+    //   }
+    // Further note that it is undocumented:
+    //   https://www.postmanlabs.com/postman-collection/Response.html
+    // Here is the implementation:
+    //   https://github.com/postmanlabs/postman-collection/blob/8895878ad81422b95124974bc5b76fbfdf29b800/lib/collection/response.js#L284
+    // It looks like responseSize is the response data length. Exactly what this includes is
+    // unclear. This StackOverflow answer discusses it, but the answers contradict each other:
+    //   https://stackoverflow.com/questions/45742705/access-response-size-in-postman-test
+    // Anyway, who cares.
+    const removeResponseResponseSize = (j) => j
+        .find(jsc.BinaryExpression)
+        .filter((path) => astNodesAreEquivalent(
+            jsc.binaryExpression(
+                '!==',
+                jsc.memberExpression(
+                    jsc.identifier('response'),
+                    jsc.identifier('responseSize')
+                ),
+                jsc.literal(0)
+            ),
+            path.value
+        ))
+        .filter((path) => jsc.IfStatement.check(path.parentPath.value))
+        .map((path) => path.parentPath, jsc.IfStatement)
+        // check that the else clause is the seemingly-standard
+        //   pm.test("something failed", function () {
+        //     throw new Error('whatever');
+        //   })
+        .forEach((path) => {
+            // If there's no else clause, we don't need to check it
+            if (path.value.alternate == null) {
+                return;
+            }
+            // assert there's exactly one statement in the body
+            assert(path.value.alternate.body.length === 1);
+            // assert that's an ExpressionStatement
+            const elseExpressionStmt = path.value.alternate.body[0];
+            assert(jsc.ExpressionStatement.check(elseExpressionStmt));
+            // assert that expression statement is a callexpression `pm.test`
+            assert(
+                astNodesAreEquivalent(
+                    elseExpressionStmt.expression.callee,
+                    buildNestedMemberExpression(['pm', 'test'])
+                )
+            );
+            // assert that the callback to pm.test is just a single throw
+            const pmTestCall = elseExpressionStmt.expression;
+            assert(pmTestCall.arguments.length === 2);
+            const pmTestCallback = pmTestCall.arguments[1];
+            assert(jsc.FunctionExpression.check(pmTestCallback) || jsc.ArrowFunctionExpression.check(pmTestCallback))
+            assert(pmTestCallback.body.body.length === 1);
+            assert(jsc.ThrowStatement.check(pmTestCallback.body.body[0]));
+        })
+        .forEach((path) => {
+            path.replace(
+                path.value.consequent
+            );
+        });
+
+
+    // Replace response.json().headers with response.headers
+    const replaceResponseJsonHeaders = (j) => j
+        .find(jsc.MemberExpression)
+        .filter((path) => astNodesAreEquivalent(
+            path.value,
+            jsc.memberExpression(
+                jsc.callExpression(
+                    jsc.memberExpression(
+                        jsc.identifier('response'),
+                        jsc.identifier('json')
+                    ),
+                    []
+                ),
+                jsc.identifier('headers')
+            )
+        ))
+        .forEach((path) => path.replace(
+            jsc.memberExpression(
+                jsc.identifier('response'),
+                jsc.identifier('headers')
+            )
+        ))
+
+
     const assertPmResponseIsReplaced = (j) => assert(0 === j
         .find(jsc.MemberExpression)
         .filter((path) =>
@@ -569,11 +673,73 @@ const createOrReplaceOutputDir = async (name) => {
         .size()
     );
 
+
+    // After transformation, some places in the code do this:
+    //   const resp = await axios(config);
+    //   resp.data.forEach(d => await pm.sendRequest(f(d)));
+    // Specifically, they call an async function inside a sync function. Because we actually want
+    // to control execution, we need to transform them to this:
+    //   const resp = await axios(config);
+    //   await Promise.all(resp.data.map(async d => await pm.sendRequest(f(d))));
+    const functionBodyContainsAwaitExpression = (fAstPath) =>
+        jsc(fAstPath.get('body').get('body')).find(jsc.AwaitExpression).length > 0
+    const transformForEachToAwaitPromiseAll = (j) => j
+        .find(jsc.CallExpression)
+        .filter((path) => jsc.MemberExpression.check(path.value.callee))
+        .filter((path) => jsc.Identifier.check(path.value.callee.property))
+        .filter((path) => path.value.callee.property.name === 'forEach')
+        .filter((path) => functionBodyContainsAwaitExpression(path.get('arguments').get('0')))
+        .forEach((path) => {
+            // assert that there is only one argument supplied to the `forEach` call
+            assert(path.value.arguments.length === 1);
+            // assert that there is only one parameter to the callback function
+            const callback = path.get('arguments').get('0');
+            const callbackArgs = callback.value.arguments || callback.value.params;
+            assert(callbackArgs.length === 1);
+            // make our forEach argument async
+            callback.get('async').replace(true);
+            // make our forEach into a `map`
+            path.get('callee').get('property').replace(
+                jsc.identifier('map')
+            );
+            // wrap our CallExpression in Promise.all and await the result
+            path.replace(
+                jsc.awaitExpression(
+                    jsc.callExpression(
+                        jsc.memberExpression(
+                            jsc.identifier('Promise'),
+                            jsc.identifier('all')
+                        ),
+                        [ path.value ]
+                    )
+                )
+            );
+        })
+
+
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
+    //
+    // Not currently running the pm request pojo assertion because pm.sendRequest is frequently
+    // called with a string argument. Our implementation of pm.sendRequest currently handles
+    // strings and POJOs and throws for everything else. This should suffice until we identify any
+    // other need. However, it's likely possible to use axios-requestgen to generate the request.
+    // For example (untested):
+    //   const { promisify } = require('util');
+    //   const requestCodeGen = require('./axios-requestgen');
+    //   const sdk = require('postman-collection');
+    //   const request = jsc(src)
+    //       .find(jsc.CallExpression)
+    //       .filter(/* return calls to pm.sendRequest */)
+    //       .map(/* return the first argument to pm.sendRequest */)
+    //       .at(0).paths()[0];
+    //   const pmRequest = new sdk.Request((eval(request)));
+    //   const opts = { ... }; // see transformCollection.js for an example
+    //   return promisify(requestCodeGen.convert)(pmRequest, opts);
     // assertPmHttpRequestsAreAllPojos(j);
+    //
     transformPmSendRequestToAsync(j);
-    // assertSetTimeoutCalledWithTwoArgs(j);
+    assertSetTimeoutCalledWithTwoArgs(j);
     promisifySetTimeout(j);
     replaceTestResponse(j);
     replacePmResponseJson(j);
@@ -581,6 +747,9 @@ const createOrReplaceOutputDir = async (name) => {
     assertPmResponseIsReplaced(j);
     replaceVariableUsage(j);
     assertPmVariablesGone(j);
+    transformForEachToAwaitPromiseAll(j);
+    replaceResponseJsonHeaders(j);
+    removeResponseResponseSize(j);
 
     await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
@@ -694,8 +863,35 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // 25. Check for any promise assignments that are not awaited. For example, some of our new
     //     functionality is async, replacing functionality that was previously synchronous.
+    //
+    // 26. Assert that the same number of `it` calls exist before and after the transformation.
+    //
+    // 26. What is this?
+    //       var navigator = {}; //fake a navigator object for the lib
+    //       var window = {}; //fake a window object for the lib
+    //     Probably get rid of that..
+    //
+    // 27. Consider analysing usage of `var` and applying `const` or `let` where appropriate
+    //     (although, eslint is likely to do this for us, I would think)
+    //
+    // 28. Wherever setTimeoutPromise is used we can probably replace it now with sleep, followed
+    //     by the setTimeoutPromise callback function. We could also analyse the _purpose_ of
+    //     setTimeout and replace it with something more sensible. Likely the wait is occurring
+    //     because we expect the switch to be completing a transfer, or similar. The solution might
+    //     be something like websockets on the simulator test endpoints so we _receive_ an event
+    //     when it happens rather than having to poll for it.
+    //
+    // 29. Go through every ObjectExpression and
+    //     1. compare it to every other ObjectExpression with `astNodesAreEquivalent`
+    //     2. where there's a certain amount of duplication, hoist it to a global data variable
+    //
+    // 30. Replace all pm.expect (and any other expect) with jest expect
+    //
+    // 31. Identify repeated "tests" or setup (probably by inspection rather than automatically)
+    //     and turn them into functions. Probably write said functions manually but consider
+    //     automatically replacing the code they'll replace.
 
-    // Example:
+    // Examples:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
     // copy-pasted)
     // const decs = j
@@ -706,4 +902,10 @@ const createOrReplaceOutputDir = async (name) => {
     // assert(nodes.length > 1);
     // pp(nodes.length);
     // pp(astNodesAreEquivalent(nodes[0], nodes[1]));
+    //
+    // Remove some nodes
+    //   const src = 'var x = 5'
+    //   jsc(src).find(jsc.VariableDeclaration).remove();
+    // Or
+    //   jsc(src).find(jsc.VariableDeclaration).forEach(p => p.prune());
 })();

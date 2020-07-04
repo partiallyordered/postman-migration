@@ -4,7 +4,8 @@
   "description": "",
   "main": "migrate.js",
   "scripts": {
-    "test": "jest -b 1 ./res.test.js",
+    "test": "jest --detectOpenHandles --testNamePattern='Deposit Funds in Settlement Account - payerfsp' --bail=1 ./res.test.js",
+    "testsimple": "jest ./res.test.js",
     "transform": "node migrate.js"
   },
   "keywords": [],
