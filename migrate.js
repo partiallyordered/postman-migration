@@ -360,6 +360,11 @@ const createOrReplaceOutputDir = async (name) => {
                 }))
                 .sort((a, b) => a.timeout - b.timeout);
 
+            Interaction between here and probably transformPmSendRequestToAsync means we're
+            removing pm.sendRequest calls :(. Maybe something to do with them being immediately
+            before the setTimeoutCalls. Or something to do with the children of some nodes not
+            being refreshed or something.
+
             // Replace the original block statement
             blockStatement.replace(
                 jsc.blockStatement([
