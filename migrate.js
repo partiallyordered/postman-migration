@@ -83,7 +83,6 @@ const preamble = [
     'const { createPmSandbox } = require(\'./pm\');',
     'const pm = createPmSandbox({});',
     'const { promisify } = require(\'util\');',
-    `const ${setTimeoutPromiseName} = promisify(setTimeout);`,
     'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
     'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
@@ -110,11 +109,11 @@ const createOrReplaceOutputDir = async (name) => {
     // original collection item.
     // Anyway... start with source code transformation, but keep in mind transformation of the
     // collection before code generation.
-    const src = `${preamble}${await transformCollection(collection)}`;
+    const src = await transformCollection(collection);
     const j = jsc(src);
     const testCmd = require('./package.json').scripts.test.split(' ');
     const testFileName = testCmd[testCmd.length - 1];
-    fs.writeFile(`${testFileName.replace(/\.js$/, '-precodemod.js')}`, src);
+    fs.writeFile(`${testFileName.replace(/\.js$/, '-precodemod.js')}`, `${preamble}${src}`);
 
     // Check node equivalence. Useful for determining whether two variables have the same definition.
     // Next: write something to determine the lowest shared scope. Seems `path` types have a `.scope`
@@ -331,26 +330,96 @@ const createOrReplaceOutputDir = async (name) => {
         });
 
 
-    // Find all block statements containing setTimeouts
-    // Extract the setTimeout callbacks and timeouts
-    // Remove the setTimeout calls
-    // In the order of their timeouts, transform their timeouts and add sleeps as appropriate. For
-    //   example, if there was the following code:
-    //     setTimeout(function executedSecond() { console.log('executed after ~1000ms') }, 1000);
-    //     setTimeout(function executedFirst() { console.log('executed after ~500ms') }, 500);
-    //   we need to replace it with something like:
-    //     sleep(500);
-    //     {
-    //       // NOTE: to avoid name clashes with the parent scope, we insert the content of the
-    //       // function we previously called `executedFirst` in a new block statement here
-    //       console.log('executed after ~500ms');
-    //     }
-    //     sleep(500); // NOTE the 500 here, not 1000!
-    //     {
-    //       console.log('executed after ~1000ms');
-    //     }
+    // 1. Find all block statements containing setTimeouts
+    // 2. Extract the setTimeout callbacks and timeouts
+    // 3. Remove the setTimeout calls
+    // 4. In the order of their timeouts, transform their timeouts and add sleeps as appropriate. For
+    //    example, if there was the following code:
+    //      setTimeout(function executedSecond() { console.log('executed after ~1000ms') }, 1000);
+    //      setTimeout(function executedFirst() { console.log('executed after ~500ms') }, 500);
+    //    We need to replace it with something like:
+    //      await sleep(500);
+    //      {
+    //        // NOTE: to avoid name clashes with the parent scope, we insert the content of the
+    //        // function we previously called `executedFirst` in a new block statement here
+    //        console.log('executed after ~500ms');
+    //      }
+    //      await sleep(500); // NOTE the 500 here, not 1000!
+    //      {
+    //        console.log('executed after ~1000ms');
+    //      }
+    const isSetTimeoutExpressionStatement = (node) =>
+           jsc.ExpressionStatement.check(node)
+        && jsc.CallExpression.check(node.expression)
+        && jsc.Identifier.check(node.expression.callee)
+        && node.expression.callee.name === 'setTimeout'
+
     const replaceSetTimeout = (j) => j
         .find(jsc.BlockStatement)
+        .filter((path) => path.value.body.some(isSetTimeoutExpressionStatement))
+        .forEach((blockStatement) => {
+            // Each path now represents a BlockStatement that contains at least one setTimeout call
+            // at its top level.
+
+            const blockStatementBody = blockStatement.get('body');
+            const setTimeouts = blockStatementBody.filter((p) => isSetTimeoutExpressionStatement(p.value));
+
+            // Assert setTimeout calls each have only two arguments supplied. This makes our job a
+            // little easier.
+            assert(setTimeouts.every((path) => path.value.expression.arguments.length === 2));
+
+            // Find the earliest timeout. We'll normalise all others relative to that one.
+            const earliest = Math.min(...setTimeouts.map((path) => path.value.expression.arguments[1].value));
+
+            // Turn each setTimeout into an object that looks like:
+            //   { timeout: x, body }
+            // where timeout is the second argument to setTimeout and body is the function body of
+            // the first argument.
+            // We're relying on stable array sort here, which became available in node 12. Stable
+            // sort means timeouts that occurred first previously, will still occur first after the
+            // transform.
+            assert(Number(process.versions.node.split('.')[0]) > 11)
+            const timeouts = setTimeouts
+                .map((path) => ({
+                    timeout: path.value.expression.arguments[1].value - earliest,
+                    body: path.get('expression').get('arguments').get('0').get('body')
+                }))
+                .sort((a, b) => a.timeout - b.timeout);
+
+            // Replace the original block statement
+            blockStatement.replace(
+                jsc.blockStatement([
+                    // original block statement body, no setTimeouts
+                    ...blockStatementBody.value.filter((p) => !isSetTimeoutExpressionStatement(p)),
+                    // our new code that consists of sleeps + the old setTimeout callback bodies
+                    ...timeouts
+                        .map(({ timeout, body }) => [
+                            jsc.expressionStatement(
+                                jsc.awaitExpression(
+                                    jsc.callExpression(
+                                        jsc.identifier('sleep'),
+                                        [ jsc.literal(timeout + earliest) ]
+                                    )
+                                )
+                            ),
+                            body.value
+                        ])
+                        .reduce((acc, nodes) => [...acc, ...nodes])
+                ])
+            );
+        });
+
+
+    // In replaceSetTimeout we only replace setTimeout calls that are at the top level of a
+    // block statement. This is because the code that was intended to be transformed by this code
+    // did not use setTimeout in other contexts. Therefore, no effort was expended considering
+    // those other contexts. This assert ensures that we know if our assumptions about the code
+    // were invalid.
+    const assertNoSetTimeout = (j) => assert(0 === j
+        .find(jsc.Identifier)
+        .filter((path) => path.value.name === 'setTimeout')
+        .length
+    );
 
 
     // Variables:
@@ -585,9 +654,10 @@ const createOrReplaceOutputDir = async (name) => {
 
 
     // Replace this pattern:
-    // pm.test("Status code is blah", function () {
-    //   pm.response.to.have.status(200);
-    // });
+    //   pm.test("Status code is blah", function () {
+    //     pm.response.to.have.status(200);
+    //   });
+    // TODO: with what? (just add a comment here explaining)
     const replaceTestResponse = (j) => {
         // Utilities
         const testResponsePattern = (desc, code) =>
@@ -886,6 +956,14 @@ const createOrReplaceOutputDir = async (name) => {
     );
 
 
+    // We naively replace var with let to allow identifier shadowing in child scopes. We expect
+    // that any problems with this will be identified at run-time.
+    const replaceVarWithLet = (j) => j
+        .find(jsc.VariableDeclaration)
+        .filter((path) => path.value.kind === 'var')
+        .forEach((path) => path.get('kind').replace('let'));
+
+
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
     //
@@ -911,6 +989,7 @@ const createOrReplaceOutputDir = async (name) => {
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
     replaceSetTimeout(j);
+    assertNoSetTimeout(j);
     // promisifySetTimeout(j);
     replaceTestResponse(j);
     replacePmResponseJson(j);
@@ -934,8 +1013,9 @@ const createOrReplaceOutputDir = async (name) => {
     removeResponseResponseSize(j);
     removeJsRsaSignEvalAndRelatedRubbish(j);
     assertNoEval(j);
+    replaceVarWithLet(j);
 
-    await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
+    await fs.writeFile(testFileName, `${preamble}${j.toSource({ tabWidth: 4 })}`);
 
 
     // TODO: transformations:
