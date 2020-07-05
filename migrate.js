@@ -46,6 +46,9 @@
 // - better handle axios request errors?
 // - Only print a whole load of shit when the test fails? Not when it succeeds? Or can Jest handle
 //   output more cleverly, structuring it per-test or something?
+// - Tidy up environment file. Consider rewriting it as part of this transform code.
+//    - get rid of jsrsassign [sic]
+// - Add messages to every assert in this file
 
 // Notes:
 // - Jest execution order:
@@ -53,18 +56,22 @@
 
 const collection = require('../Golden_Path_Mowali.postman_collection.json');
 const util = require('util');
-const pp = (...args) => console.log(util.inspect(...args, { depth: 2, colors: true }));
 const fs = require('fs').promises;
 const jsc = require('jscodeshift');
 const { transformCollection, convertRequest } = require('./transformCollection');
 const assert = require('assert').strict;
 const recast = require('recast');
+const environment = new Map(
+    require('../environments/Casa-DEV.postman_environment.json').values.map(({ key, value }) => [key, value])
+);
 
 const axiosResponseVarName = 'resp';
 // TODO: convert this to ast-types? That way we can, for example, refer to setTimeoutPromiseName as
 // a node, rather than a string.
 const setTimeoutPromiseName = 'setTimeoutPromise';
 const preamble = [
+    'const tv4 = require(\'tv4\');',
+    'const KJUR = require(\'jsrsasign\')',
     'const assert = require(\'assert\').strict;',
     'const axios = require(\'axios\');',
     'const uuid = require(\'uuid\');',
@@ -74,6 +81,7 @@ const preamble = [
     `const ${setTimeoutPromiseName} = promisify(setTimeout);`,
     'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
+    'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
 ].join('\n');
 
 const createOrReplaceOutputDir = async (name) => {
@@ -335,6 +343,7 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // Also, replace all remaining usage of `{{var_name}}` with pm.environment.get('var_name').
     const localsVarName = 'locals';
+    const pmVariableRegex = /{{[^}]+}}/; // Anything that looks a bit like {{var_name}}
     const replaceVariableUsage = (j) => j
         .find(jsc.CallExpression)
         .filter((p) => jsc.Identifier.check(p.value.callee))
@@ -396,11 +405,17 @@ const createOrReplaceOutputDir = async (name) => {
                 )
             );
 
-            // For each `pm.variables.get` in the `it` call, replace it with a variable reference.
+            // For each `pm.variables.get` in the `it` call, replace it appropriately.
             // From:
             //   pm.variables.get('var_name')
-            // to
+            // to:
             //   locals.var_name
+            // or, when there is no local var, but there is an environment var, we'll use
+            // pm.environment.get:
+            // From:
+            //   pm.variables.get('var_name')
+            // to:
+            //   pm.environment.get('var_name')
             jsc(itCallExpression)
                 .find(jsc.CallExpression)
                 .filter((p) => astNodesAreEquivalent(
@@ -410,19 +425,31 @@ const createOrReplaceOutputDir = async (name) => {
                 .forEach((pmVarGetCallExpression) => {
                     assert(
                         jsc.Literal.check(pmVarGetCallExpression.value.arguments[0]),
-                        'Expected first argument to  pm.variables.set to be a string literal'
+                        'Expected first argument to  pm.variables.get to be a string literal'
                     );
                     assert(
                         pmVarGetCallExpression.value.arguments.length === 1,
                         'Expected pm.variables.get to have exactly two arguments'
                     );
                     const varName = pmVarGetCallExpression.value.arguments[0].value;
-                    pmVarGetCallExpression.replace(
-                        jsc.memberExpression(
-                            jsc.identifier(localsVarName),
-                            jsc.identifier(varName)
-                        )
+                    assert(
+                        varNames.has(varName) || environment.has(varName),
+                        `Expected argument ${varName} supplied to pm.variables.get call to be present in environment or local variables`
                     );
+                    if (varNames.has(varName)) {
+                        // pm.variables.get('var_name') -> locals.var_name
+                        pmVarGetCallExpression.replace(
+                            jsc.memberExpression(
+                                jsc.identifier(localsVarName),
+                                jsc.identifier(varName)
+                            )
+                        );
+                    } else {
+                        // pm.variables.get -> pm.environment.get
+                        pmVarGetCallExpression.get('callee').get('object').get('property').replace(
+                            jsc.identifier('environment')
+                        );
+                    }
                 });
 
             // Get all string literals in the `it` CallExpression and
@@ -431,37 +458,55 @@ const createOrReplaceOutputDir = async (name) => {
             // 2. replace other instances of {{var_name}} with pm.environment.get calls
             // 3. replace the string literals with template strings where we make the above
             //    replacements
+            const allVarsRegex = new RegExp(`{{(${[...environment.keys(), ...varNames.values()].join('|')})}}`);
             jsc(itCallExpression)
                 .find(jsc.Literal)
                 .filter((path) =>
-                    typeof path.value.value === 'string' && path.value.value.match(/{{[^}]+}}/)
+                       typeof path.value.value === 'string'
+                    && pmVariableRegex.test(path.value.value)
+                    && allVarsRegex.test(path.value.value)
                 )
                 .forEach((path) => {
                     // If there is a variable that is set by pm.variables.set('var_name'), we'll
                     // replace it with locals.var_name
-                    // All other variables we'll replace with instances of pm.environment.get
-                    const newStr = [...varNames.values()]
+                    const localVarsReplaced = [...varNames.values()]
                         .reduce((pv, varName) => pv.replace(
                             new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
                         ), path.value.value)
-                        // TODO: we should read in the environment file and check every instance of
-                        // `pm.environment.set` preceding the variables here. Then, if the variable has
-                        // been set either by the environment file or by `pm.environment.set`, we
-                        // should replace it. Otherwise, we should not. Wherever there is something
-                        // that _looks_ like a variable, but we can't replace it, we should print a
-                        // warning to the user.
-                        .replace(
-                            /{{([^}]+)}}/g, '${pm.environment.get(\'$1\')}'
-                        )
-                    const newCode = `\`${newStr}\``;
+                    // All other variables we'll replace with instances of pm.environment.get
+                    const allVarsReplaced = [...environment.keys()]
+                        .reduce((pv, varName) => pv.replace(
+                            new RegExp(`{{${varName}}}`), `\${pm.environment.get('${varName}')}`
+                        ), localVarsReplaced);
+                    const newCode = `\`${allVarsReplaced}\``;
                     const newNode = jsc(newCode).getAST()[0].value;
                     path.replace(newNode);
                 })
         })
 
 
+    // Notify the user of anything that looks like variables that haven't been replaced
+    const notifyUnreplacedVariables = (j) => {
+        console.log('Found the following variable-like strings that have not been replaced with pm.environment.get or local variables:');
+        j.find(jsc.Literal)
+            .filter((path) =>
+                typeof path.value.value === 'string' && pmVariableRegex.test(path.value.value)
+            )
+            .map((path) => path.get('value'))
+            .nodes()
+            .map(n => [...n.matchAll(pmVariableRegex)]) // get all matches
+            // .forEach(n => console.log(n))
+            .reduce((acc, cv) => [...acc, ...cv]) // flatten our array of arrays of matches into an array of matches
+            .map(m => m[0]) // take the first element of each match, the matched string
+            .sort()
+            .reduce((acc, cv) => acc.includes(cv) ? acc : [...acc, cv], []) // remove duplicates
+            .forEach(mStr => console.log(mStr));
+            // .forEach(pmVarName => console.log(pmVarName));
+    };
+
+
     // Assert the removal of all instances of `pm.variables`
-    const assertPmVariablesGone = (j) => assert(
+    const assertPmVariablesCallsGone = (j) => assert(
         0 === j
             .find(jsc.MemberExpression)
             .filter((path) => astNodesAreEquivalent(
@@ -717,6 +762,67 @@ const createOrReplaceOutputDir = async (name) => {
         })
 
 
+    // This exists about a million times in the code:
+    //   var navigator = {}; //fake a navigator object for the lib
+    //   var window = {}; //fake a window object for the lib
+    //   eval(pm.environment.get('jrsassign'))
+    // The variable declarations mean there isn't an error when the library is eval'ed.
+    // Get rid of the horrible lot.
+    const removeJsRsaSignEvalAndRelatedRubbish = (j) => {
+        j.find(jsc.CallExpression)
+            .filter((path) => astNodesAreEquivalent(
+                path.value,
+                jsc.callExpression(
+                    jsc.identifier('eval'),
+                    [
+                        jsc.callExpression(
+                            buildNestedMemberExpression(['pm', 'environment', 'get']),
+                            [ jsc.literal('jrsassign') ]
+                        )
+                    ]
+                )
+            ))
+            .remove();
+        // get rid of any 'var navigator' or 'var window' variabledeclarations
+        const varEqualsEmptyObjDeclaration = (varName) =>
+            jsc.variableDeclaration(
+                'var',
+                [
+                    jsc.variableDeclarator(
+                        jsc.identifier(varName),
+                        jsc.objectExpression([])
+                    )
+                ]
+            )
+        j.find(jsc.VariableDeclaration)
+            .filter((path) =>
+                   astNodesAreEquivalent(path.value, varEqualsEmptyObjDeclaration('window'))
+                || astNodesAreEquivalent(path.value, varEqualsEmptyObjDeclaration('navigator'))
+            )
+            .remove();
+    };
+
+
+    // Removes console.log('--') for any length of dash
+    const removeAnnoyingLogging = (j) => j
+        .find(jsc.CallExpression)
+        .filter((path) => path.value.arguments.length === 1)
+        .filter((path) => /^-*$/.test(path.value.arguments[0].value))
+        .filter((path) => astNodesAreEquivalent(
+            path.value.callee,
+            buildNestedMemberExpression(['console', 'log'])
+        ))
+        .remove();
+
+
+    // Is it `eval` or `evil`?
+    const assertNoEval = (j) => assert(0 === j
+        .find(jsc.Identifier)
+        .filter((path) => path.value.name === 'eval')
+        .length
+    );
+
+
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
     //
@@ -738,6 +844,7 @@ const createOrReplaceOutputDir = async (name) => {
     //   return promisify(requestCodeGen.convert)(pmRequest, opts);
     // assertPmHttpRequestsAreAllPojos(j);
     //
+    removeAnnoyingLogging(j);
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
     promisifySetTimeout(j);
@@ -746,10 +853,23 @@ const createOrReplaceOutputDir = async (name) => {
     replacePmResponseCode(j);
     assertPmResponseIsReplaced(j);
     replaceVariableUsage(j);
-    assertPmVariablesGone(j);
+    notifyUnreplacedVariables(j);
+    assertPmVariablesCallsGone(j);
     transformForEachToAwaitPromiseAll(j);
-    replaceResponseJsonHeaders(j);
+    // TODO: should we _ever_ do this?
+    // Don't do this: sometimes we get a response back (from the simulators) that contains
+    // _response data_. In other words, response looks like:
+    // {
+    //   headers: { ... }
+    //   data: {
+    //     headers: { ... }
+    //     data: { ... }
+    //   }
+    // }
+    // replaceResponseJsonHeaders(j);
     removeResponseResponseSize(j);
+    removeJsRsaSignEvalAndRelatedRubbish(j);
+    assertNoEval(j);
 
     await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
@@ -764,6 +884,13 @@ const createOrReplaceOutputDir = async (name) => {
     //       pm.test("Transfer amount is ({pm.environment.get('amount')", function () {
     //
     //  1. Replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
+    //     Example:
+    //       eval(pm.environment.get('jrsassign'));
+    //     There's this, which enables the former:
+    //       var navigator = {}; //fake a navigator object for the lib
+    //       var window = {}; //fake a window object for the lib
+    //     Probably get rid of that..
+    //     This is to do with the jsrsasign lib
     //
     //  2. Replace all usage of eval..
     //
@@ -794,22 +921,17 @@ const createOrReplaceOutputDir = async (name) => {
     //     Or possibly modify axios-requestgen to return a recast AST instead of a snippet. (This
     //     might actually be pretty easy to generate _from_ the snippet). Then mutate that.
     //
-    //  7. Wherever pm.sendRequest is called, transform this to a 
+    //  7. Wherever pm.sendRequest is called, transform this to a call to axios
     //
     //  8. Check for variables that look like they should be in a test data file/variable. For
     //     example, variables that are duplicated in multiple places (e.g. every argument to
     //     pm.sendRequest), declared const, never rewritten or modified.
-    //
-    //  9. Replace variables i.e. '{{HOST_CENTRAL_LEDGER}}' in requests with references to
-    //     `pm.environment` or `pm.variables` or whatever's appropriate.
     //
     // 10. Remove trailing whitespace
     //
     // 11. Hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
     //
     // 12. Convert all pm.sendRequest to axios using convertRequest
-    //
-    // 13. Convert all `var` usages to `let` or `const`?
     //
     // 14. Evaluate all (Mojaloop DFSP) transfers and make sure sufficient funds are supplied before
     //     every transfer
@@ -865,11 +987,7 @@ const createOrReplaceOutputDir = async (name) => {
     //     functionality is async, replacing functionality that was previously synchronous.
     //
     // 26. Assert that the same number of `it` calls exist before and after the transformation.
-    //
-    // 26. What is this?
-    //       var navigator = {}; //fake a navigator object for the lib
-    //       var window = {}; //fake a window object for the lib
-    //     Probably get rid of that..
+    //     (Except where we're getting rid of them deliberately...? So don't bother?)
     //
     // 27. Consider analysing usage of `var` and applying `const` or `let` where appropriate
     //     (although, eslint is likely to do this for us, I would think)
@@ -890,6 +1008,16 @@ const createOrReplaceOutputDir = async (name) => {
     // 31. Identify repeated "tests" or setup (probably by inspection rather than automatically)
     //     and turn them into functions. Probably write said functions manually but consider
     //     automatically replacing the code they'll replace.
+    //
+    // 32. Why does this happen?
+    //       pm.environment.set('transfer_ID', pm.environment.get('transactionId'));
+    //
+    // 33. Just eliminate the postman sandbox (fake or otherwise) altogether.
+    //
+    // 34. Search the code for:
+    //       const response = await pm.sendRequest("google.com");
+    //
+    // 35. Replace tv4 with ajv (which is faster- might speed tests)
 
     // Examples:
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
@@ -900,8 +1028,7 @@ const createOrReplaceOutputDir = async (name) => {
     //     .getVariableDeclarators(path => path.value.name);
     // const nodes = decs.nodes();
     // assert(nodes.length > 1);
-    // pp(nodes.length);
-    // pp(astNodesAreEquivalent(nodes[0], nodes[1]));
+    // console.log(astNodesAreEquivalent(nodes[0], nodes[1]));
     //
     // Remove some nodes
     //   const src = 'var x = 5'

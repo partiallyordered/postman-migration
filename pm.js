@@ -90,12 +90,13 @@ const createPmSandbox = (reportsSpec) => {
                     headers,
                 };
 
-            const result = await axios(config);
-
-            return {
-                ...result,
-                json: () => result.data,
+            const response = await axios(config);
+            const result = {
+                ...response,
+                json: () => response.data,
             };
+
+            return result;
         },
 
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmtest
