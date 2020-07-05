@@ -883,17 +883,6 @@ const createOrReplaceOutputDir = async (name) => {
     //     Further note this example of an invalid template literal:
     //       pm.test("Transfer amount is ({pm.environment.get('amount')", function () {
     //
-    //  1. Replace the _hilarious_ presence of jrsassign in (1) the environment and (2) the code
-    //     Example:
-    //       eval(pm.environment.get('jrsassign'));
-    //     There's this, which enables the former:
-    //       var navigator = {}; //fake a navigator object for the lib
-    //       var window = {}; //fake a window object for the lib
-    //     Probably get rid of that..
-    //     This is to do with the jsrsasign lib
-    //
-    //  2. Replace all usage of eval..
-    //
     //  3. Identify pm.environment.get and pm.environment.set calls, and their scope, then declare
     //     variables at an appropriate level (or don't and manually evaluate this stuff)
     //     One possibility might be to
