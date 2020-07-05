@@ -873,7 +873,15 @@ const createOrReplaceOutputDir = async (name) => {
 
     await fs.writeFile(testFileName, j.toSource({ tabWidth: 4 }));
 
+
     // TODO: transformations:
+    //  -2. `response.text` is not a function.
+    //
+    //  -1. Notice how `.has` is called on `jsonData.scenario1.result.message` instead of on
+    //     `pm.expect`?:
+    //       pm.expect((jsonData.scenario1.result.message).has(`Got an error response resolving party: {  errorInformation: { errorCode: '3200', errorDescription: 'Generic ID not found' }`));
+    //     Fix this.
+    //
     //  0. Replace all strings that are secretly template literal to be actual template literals.
     //     Postman allows this:
     //       pm.test("Currency is (${pm.environment.get('currency')")
@@ -894,9 +902,6 @@ const createOrReplaceOutputDir = async (name) => {
     //     3. if they do not pre-exist, hoist the appropriate get/set calls to the lowest shared
     //        scope (probably a `declare` block in most cases.)
     //
-    //  4. Identify pm.variables.get/set and create those variables with an appropriate scope in the
-    //     code.
-    //
     //  5. Replace (some?) duplicated string values with variables. Might require analysis on a
     //     case-by-case basis.
     //
@@ -910,6 +915,8 @@ const createOrReplaceOutputDir = async (name) => {
     //     Or possibly modify axios-requestgen to return a recast AST instead of a snippet. (This
     //     might actually be pretty easy to generate _from_ the snippet). Then mutate that.
     //
+    //     Also, see the note above about using axios-requestgen and eval to generate a request.
+    //
     //  7. Wherever pm.sendRequest is called, transform this to a call to axios
     //
     //  8. Check for variables that look like they should be in a test data file/variable. For
@@ -919,8 +926,6 @@ const createOrReplaceOutputDir = async (name) => {
     // 10. Remove trailing whitespace
     //
     // 11. Hoist (remove?) all `require` statements (might be a job for `eslint --fix`)
-    //
-    // 12. Convert all pm.sendRequest to axios using convertRequest
     //
     // 14. Evaluate all (Mojaloop DFSP) transfers and make sure sufficient funds are supplied before
     //     every transfer
