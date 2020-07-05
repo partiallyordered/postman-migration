@@ -94,6 +94,7 @@ const createPmSandbox = (reportsSpec) => {
             const result = {
                 ...response,
                 json: () => response.data,
+                text: () => response.data,
             };
 
             return result;
