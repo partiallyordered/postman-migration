@@ -59,12 +59,14 @@ const createPmSandbox = (reportsSpec) => {
             assert(
                    typeof request === 'string'
                 || typeof request === 'object' && request.constructor === Object.prototype.constructor,
-                'This function was written to handle POJO or string requests. It may make some assumptions that the argument supplied violates'
+                'This function was written to handle POJO or string requests. It may make some assumptions that the argument supplied violates.'
             );
             assert(
-                typeof request === 'string' || /get/i.test(request.method),
-                'This function was only written to handle HTTP GET requests'
+                typeof request === 'string' || /(put|get)/i.test(request.method),
+                'This function was only written to handle HTTP GET and PUT requests. It may make some assumptions that are violated for other HTTP methods.'
             );
+
+            console.log(request);
 
             // TODO: default or managed authorisation? Could pass authorisation config into the
             // sandbox create function something like this:
@@ -88,11 +90,15 @@ const createPmSandbox = (reportsSpec) => {
                     method: request.method,
                     url: request.url,
                     headers,
+                    data: request.data,
                 };
 
             const response = await axios(config);
             const result = {
-                ...response,
+                data: response.data,
+                status: response.status,
+                headers: response.headers,
+                statusText: response.statusText,
                 json: () => response.data,
                 text: () => response.data,
             };
