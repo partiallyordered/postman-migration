@@ -304,32 +304,6 @@ const createOrReplaceOutputDir = async (name) => {
     );
 
 
-    // setTimeout is being called within an async function. Therefore, we promisify it according to
-    // https://nodejs.org/api/timers.html#timers_settimeout_callback_delay_args
-    const promisifySetTimeout = (j) => j
-        .find(jsc.CallExpression)
-        .filter(callExpressionMatching(/^setTimeout$/))
-        // .filter((path) => jsc.Identifier.check(path.value.callee) && path.value.callee.name === 'setTimeout')
-        .forEach((path) => {
-            let [f, timeout] = path.value.arguments;
-            f.async = true;
-            path.replace(
-                jsc.awaitExpression(
-                    jsc.callExpression(
-                        jsc.memberExpression(
-                            jsc.callExpression(
-                                jsc.identifier(setTimeoutPromiseName),
-                                [ timeout ]
-                            ),
-                            jsc.identifier('then')
-                        ),
-                        [ f ]
-                    )
-                )
-            )
-        });
-
-
     // 1. Find all block statements containing setTimeouts
     // 2. Extract the setTimeout callbacks and timeouts
     // 3. Remove the setTimeout calls
@@ -990,7 +964,6 @@ const createOrReplaceOutputDir = async (name) => {
     assertSetTimeoutCalledWithTwoArgs(j);
     replaceSetTimeout(j);
     assertNoSetTimeout(j);
-    // promisifySetTimeout(j);
     replaceTestResponse(j);
     replacePmResponseJson(j);
     replacePmResponseCode(j);
