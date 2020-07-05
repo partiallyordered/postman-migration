@@ -5,7 +5,7 @@
   "main": "migrate.js",
   "scripts": {
     "test": "jest --detectOpenHandles --testNamePattern='Deposit Funds in Settlement Account - payerfsp' --bail=1 ./res.test.js",
-    "testsimple": "jest ./res.test.js",
+    "testsimple": "jest --testTimeout=30000 ./res.test.js",
     "transform": "node migrate.js"
   },
   "jest": {

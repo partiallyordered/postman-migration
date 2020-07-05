@@ -49,6 +49,8 @@
 // - Tidy up environment file. Consider rewriting it as part of this transform code.
 //    - get rid of jsrsassign [sic]
 // - Add messages to every assert in this file
+// - Automatic eslint pass afterward. Let user supply eslint config? (At least don't have it set
+//   globally by this module?)
 
 // Notes:
 // - Jest execution order:
@@ -68,6 +70,9 @@ const environment = new Map(
 const axiosResponseVarName = 'resp';
 // TODO: convert this to ast-types? That way we can, for example, refer to setTimeoutPromiseName as
 // a node, rather than a string.
+// TODO: notice that certain transformations require things added to the preamble. We _could_ have
+// the transformations add them as they are required. (Alternatively, we could let the final eslint
+// pass identify when we've been naughty and added stuff we don't need to).
 const setTimeoutPromiseName = 'setTimeoutPromise';
 const preamble = [
     'const tv4 = require(\'tv4\');',
@@ -82,6 +87,7 @@ const preamble = [
     'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
     'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
+    'const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));',
 ].join('\n');
 
 const createOrReplaceOutputDir = async (name) => {
@@ -325,6 +331,28 @@ const createOrReplaceOutputDir = async (name) => {
         });
 
 
+    // Find all block statements containing setTimeouts
+    // Extract the setTimeout callbacks and timeouts
+    // Remove the setTimeout calls
+    // In the order of their timeouts, transform their timeouts and add sleeps as appropriate. For
+    //   example, if there was the following code:
+    //     setTimeout(function executedSecond() { console.log('executed after ~1000ms') }, 1000);
+    //     setTimeout(function executedFirst() { console.log('executed after ~500ms') }, 500);
+    //   we need to replace it with something like:
+    //     sleep(500);
+    //     {
+    //       // NOTE: to avoid name clashes with the parent scope, we insert the content of the
+    //       // function we previously called `executedFirst` in a new block statement here
+    //       console.log('executed after ~500ms');
+    //     }
+    //     sleep(500); // NOTE the 500 here, not 1000!
+    //     {
+    //       console.log('executed after ~1000ms');
+    //     }
+    const replaceSetTimeout = (j) => j
+        .find(jsc.BlockStatement)
+
+
     // Variables:
     //   https://learning.postman.com/docs/postman/variables-and-environments/variables/#variable-scopes
     // Especially:
@@ -344,148 +372,183 @@ const createOrReplaceOutputDir = async (name) => {
     // Also, replace all remaining usage of `{{var_name}}` with pm.environment.get('var_name').
     const localsVarName = 'locals';
     const pmVariableRegex = /{{[^}]+}}/; // Anything that looks a bit like {{var_name}}
-    const replaceVariableUsage = (j) => j
-        .find(jsc.CallExpression)
-        .filter((p) => jsc.Identifier.check(p.value.callee))
-        .filter((p) => /^it$/.test(p.value.callee.name))
-        // .at(39)
-        // .forEach((p) => console.log(jsc(p).toSource()))
-        .forEach((itCallExpression) => {
-            // For each `pm.variables.set` in the `it` call, get all postman variable literals and
-            // `pm.variables.get` and replace them with `locals.VAR_NAME`
-            let varNames = new Set();
-            jsc(itCallExpression)
-                .find(jsc.CallExpression)
-                .filter((p) => astNodesAreEquivalent(
-                    p.value.callee,
-                    buildNestedMemberExpression(['pm', 'variables', 'set'])
-                ))
-                .forEach((pmVarSetCallExpression) => {
-                    assert(
-                        jsc.Literal.check(pmVarSetCallExpression.value.arguments[0]),
-                        'Expected first argument to pm.variables.set to be a string literal'
-                    );
-                    assert(
-                        pmVarSetCallExpression.value.arguments.length === 2,
-                        'Expected pm.variables.set to have exactly two arguments'
-                    );
-                    const varName = pmVarSetCallExpression.value.arguments[0].value;
-                    // Replace the `pm.variables.set` call with a variable assignment
-                    const varAssignment = jsc.assignmentExpression(
-                        "=",
-                        jsc.memberExpression(
-                            jsc.identifier(localsVarName),
-                            jsc.identifier(varName)
-                        ),
-                        pmVarSetCallExpression.value.arguments[1]
-                    );
-                    varNames.add(pmVarSetCallExpression.value.arguments[0].value);
-                    pmVarSetCallExpression.replace(varAssignment);
-                });
+    const replaceVariableUsage = (j) => {
+        // TODO: note that we don't consider scope _at all_ here. This is a bit of a disaster. This
+        // is one place we could analyse the scope of pm.environment.set calls and allow or
+        // disallow the use of pm.environment.get calls for the same variables. Note however that
+        // due to our implementation of the postman sandbox, attempted access of a non-existent
+        // variable is now a runtime error rather than a silent failure.
+        const environmentNotInEnvironmentFile = j
+            .find(jsc.CallExpression)
+            .filter((path) => astNodesAreEquivalent(
+                path.value.callee,
+                buildNestedMemberExpression(['pm', 'environment', 'set'])
+            ))
+            // assert they're called with two arguments
+            .forEach((p) => assert(
+                p.value.arguments.length === 2,
+                'Expected all pm.environment.set calls to have two arguments'
+            ))
+            // filter out template literals and identifiers- they _should_ just work
+            .filter((p) => jsc.Literal.check(p.value.arguments[0]))
+            .filter((p) => !environment.has(p.value.arguments[0]))
+            // map the results to a an array for consumption by the Set constructor
+            .map((p) => p.get('arguments').get('0').get('value'))
+            .nodes();
 
-            // insert the `locals` object at the beginning of the `it` callback function statement
-            // block.
-            // E.g.
-            //   it('blah', () => {
-            //     // stuff
-            //   })
-            // to
-            //   it('blah', () => {
-            //     let locals = {};
-            //   })
-            itCallExpression.get('arguments').get('1').get('body').get('body').get('0').insertBefore(
-                jsc.variableDeclaration(
-                    'let',
-                    [
-                        jsc.variableDeclarator(
-                            jsc.identifier(localsVarName),
-                            jsc.objectExpression([])
-                        )
-                    ]
-                )
-            );
+        // TODO: printing this will show all the pm.environment.set calls that are used to set
+        // mutable global state.
+        // console.log(new Set(environmentNotInEnvironmentFile));
 
-            // For each `pm.variables.get` in the `it` call, replace it appropriately.
-            // From:
-            //   pm.variables.get('var_name')
-            // to:
-            //   locals.var_name
-            // or, when there is no local var, but there is an environment var, we'll use
-            // pm.environment.get:
-            // From:
-            //   pm.variables.get('var_name')
-            // to:
-            //   pm.environment.get('var_name')
-            jsc(itCallExpression)
-                .find(jsc.CallExpression)
-                .filter((p) => astNodesAreEquivalent(
-                    p.value.callee,
-                    buildNestedMemberExpression(['pm', 'variables', 'get'])
-                ))
-                .forEach((pmVarGetCallExpression) => {
-                    assert(
-                        jsc.Literal.check(pmVarGetCallExpression.value.arguments[0]),
-                        'Expected first argument to  pm.variables.get to be a string literal'
-                    );
-                    assert(
-                        pmVarGetCallExpression.value.arguments.length === 1,
-                        'Expected pm.variables.get to have exactly two arguments'
-                    );
-                    const varName = pmVarGetCallExpression.value.arguments[0].value;
-                    assert(
-                        varNames.has(varName) || environment.has(varName),
-                        `Expected argument ${varName} supplied to pm.variables.get call to be present in environment or local variables`
-                    );
-                    if (varNames.has(varName)) {
-                        // pm.variables.get('var_name') -> locals.var_name
-                        pmVarGetCallExpression.replace(
+        // Create a set containing keys from both the environment file map and the
+        // pm.environment.set map.
+        const allEnvVarNames = new Set([...environmentNotInEnvironmentFile, ...environment.keys()]);
+
+        return j
+            .find(jsc.CallExpression)
+            .filter((p) => jsc.Identifier.check(p.value.callee))
+            .filter((p) => /^it$/.test(p.value.callee.name))
+            // .at(39)
+            // .forEach((p) => console.log(jsc(p).toSource()))
+            .forEach((itCallExpression) => {
+                // For each `pm.variables.set` in the `it` call, get all postman variable literals and
+                // `pm.variables.get` and replace them with `locals.VAR_NAME`
+                let varNames = new Set();
+                jsc(itCallExpression)
+                    .find(jsc.CallExpression)
+                    .filter((p) => astNodesAreEquivalent(
+                        p.value.callee,
+                        buildNestedMemberExpression(['pm', 'variables', 'set'])
+                    ))
+                    .forEach((pmVarSetCallExpression) => {
+                        assert(
+                            jsc.Literal.check(pmVarSetCallExpression.value.arguments[0]),
+                            'Expected first argument to pm.variables.set to be a string literal'
+                        );
+                        assert(
+                            pmVarSetCallExpression.value.arguments.length === 2,
+                            'Expected pm.variables.set to have exactly two arguments'
+                        );
+                        const varName = pmVarSetCallExpression.value.arguments[0].value;
+                        // Replace the `pm.variables.set` call with a variable assignment
+                        const varAssignment = jsc.assignmentExpression(
+                            "=",
                             jsc.memberExpression(
                                 jsc.identifier(localsVarName),
                                 jsc.identifier(varName)
+                            ),
+                            pmVarSetCallExpression.value.arguments[1]
+                        );
+                        varNames.add(pmVarSetCallExpression.value.arguments[0].value);
+                        pmVarSetCallExpression.replace(varAssignment);
+                    });
+
+                // insert the `locals` object at the beginning of the `it` callback function statement
+                // block.
+                // E.g.
+                //   it('blah', () => {
+                //     // stuff
+                //   })
+                // to
+                //   it('blah', () => {
+                //     let locals = {};
+                //   })
+                itCallExpression.get('arguments').get('1').get('body').get('body').get('0').insertBefore(
+                    jsc.variableDeclaration(
+                        'let',
+                        [
+                            jsc.variableDeclarator(
+                                jsc.identifier(localsVarName),
+                                jsc.objectExpression([])
                             )
-                        );
-                    } else {
-                        // pm.variables.get -> pm.environment.get
-                        pmVarGetCallExpression.get('callee').get('object').get('property').replace(
-                            jsc.identifier('environment')
-                        );
-                    }
-                });
+                        ]
+                    )
+                );
 
-            // Get all string literals in the `it` CallExpression and
-            // 1. replace instances of {{var_name}} that we've identified as being local postman
-            //    variables
-            // 2. replace other instances of {{var_name}} with pm.environment.get calls
-            // 3. replace the string literals with template strings where we make the above
-            //    replacements
-            const allVarsRegex = new RegExp(`{{(${[...environment.keys(), ...varNames.values()].join('|')})}}`);
-            jsc(itCallExpression)
-                .find(jsc.Literal)
-                .filter((path) =>
-                       typeof path.value.value === 'string'
-                    && pmVariableRegex.test(path.value.value)
-                    && allVarsRegex.test(path.value.value)
-                )
-                .forEach((path) => {
-                    // If there is a variable that is set by pm.variables.set('var_name'), we'll
-                    // replace it with locals.var_name
-                    const localVarsReplaced = [...varNames.values()]
-                        .reduce((pv, varName) => pv.replace(
-                            new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
-                        ), path.value.value)
-                    // All other variables we'll replace with instances of pm.environment.get
-                    const allVarsReplaced = [...environment.keys()]
-                        .reduce((pv, varName) => pv.replace(
-                            new RegExp(`{{${varName}}}`), `\${pm.environment.get('${varName}')}`
-                        ), localVarsReplaced);
-                    const newCode = `\`${allVarsReplaced}\``;
-                    const newNode = jsc(newCode).getAST()[0].value;
-                    path.replace(newNode);
-                })
-        })
+                // For each `pm.variables.get` in the `it` call, replace it appropriately.
+                // From:
+                //   pm.variables.get('var_name')
+                // to:
+                //   locals.var_name
+                // or, when there is no local var, but there is an environment var, we'll use
+                // pm.environment.get:
+                // From:
+                //   pm.variables.get('var_name')
+                // to:
+                //   pm.environment.get('var_name')
+                jsc(itCallExpression)
+                    .find(jsc.CallExpression)
+                    .filter((p) => astNodesAreEquivalent(
+                        p.value.callee,
+                        buildNestedMemberExpression(['pm', 'variables', 'get'])
+                    ))
+                    .forEach((pmVarGetCallExpression) => {
+                        assert(
+                            jsc.Literal.check(pmVarGetCallExpression.value.arguments[0]),
+                            'Expected first argument to  pm.variables.get to be a string literal'
+                        );
+                        assert(
+                            pmVarGetCallExpression.value.arguments.length === 1,
+                            'Expected pm.variables.get to have exactly two arguments'
+                        );
+                        const varName = pmVarGetCallExpression.value.arguments[0].value;
+                        assert(
+                            varNames.has(varName) || allEnvVarNames.has(varName),
+                            `Expected argument ${varName} supplied to pm.variables.get call to be present in environment or local variables`
+                        );
+                        if (varNames.has(varName)) {
+                            // pm.variables.get('var_name') -> locals.var_name
+                            pmVarGetCallExpression.replace(
+                                jsc.memberExpression(
+                                    jsc.identifier(localsVarName),
+                                    jsc.identifier(varName)
+                                )
+                            );
+                        } else {
+                            // pm.variables.get -> pm.environment.get
+                            pmVarGetCallExpression.get('callee').get('object').get('property').replace(
+                                jsc.identifier('environment')
+                            );
+                        }
+                    });
 
+                // Get all string literals in the `it` CallExpression and
+                // 1. replace instances of {{var_name}} that we've identified as being local postman
+                //    variables
+                // 2. replace other instances of {{var_name}} with pm.environment.get calls
+                // 3. replace the string literals with template strings where we make the above
+                //    replacements
+                const allVarsRegex = new RegExp(`{{(${[...allEnvVarNames.keys(), ...varNames.values()].join('|')})}}`);
+                jsc(itCallExpression)
+                    .find(jsc.Literal)
+                    .filter((path) =>
+                           typeof path.value.value === 'string'
+                        && pmVariableRegex.test(path.value.value)
+                        && allVarsRegex.test(path.value.value)
+                    )
+                    .forEach((path) => {
+                        // If there is a variable that is set by pm.variables.set('var_name'), we'll
+                        // replace it with locals.var_name
+                        const localVarsReplaced = [...varNames.values()]
+                            .reduce((pv, varName) => pv.replace(
+                                new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
+                            ), path.value.value)
+                        // Variables that are present in the environment file, _or have been set in the
+                        // environment with pm.environment.set, we'll replace with instances of
+                        // pm.environment.get
+                        const allVarsReplaced = [...allEnvVarNames.keys()]
+                            .reduce((pv, varName) => pv.replace(
+                                new RegExp(`{{${varName}}}`), `\${pm.environment.get('${varName}')}`
+                            ), localVarsReplaced);
+                        const newCode = `\`${allVarsReplaced}\``;
+                        const newNode = jsc(newCode).getAST()[0].value;
+                        path.replace(newNode);
+                    })
+            })
+    };
 
     // Notify the user of anything that looks like variables that haven't been replaced
+    // TODO: this needs to look in template literals also
     const notifyUnreplacedVariables = (j) => {
         console.log('Found the following variable-like strings that have not been replaced with pm.environment.get or local variables:');
         j.find(jsc.Literal)
@@ -847,7 +910,8 @@ const createOrReplaceOutputDir = async (name) => {
     removeAnnoyingLogging(j);
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
-    promisifySetTimeout(j);
+    replaceSetTimeout(j);
+    // promisifySetTimeout(j);
     replaceTestResponse(j);
     replacePmResponseJson(j);
     replacePmResponseCode(j);
@@ -875,8 +939,6 @@ const createOrReplaceOutputDir = async (name) => {
 
 
     // TODO: transformations:
-    //  -2. `response.text` is not a function.
-    //
     //  -1. Notice how `.has` is called on `jsonData.scenario1.result.message` instead of on
     //     `pm.expect`?:
     //       pm.expect((jsonData.scenario1.result.message).has(`Got an error response resolving party: {  errorInformation: { errorCode: '3200', errorDescription: 'Generic ID not found' }`));

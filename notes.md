@@ -253,6 +253,8 @@ Shortcomings of Postman:
     9. See a PR to the `test-scripts` repo and realise it's all real.
     10. Despair. Ennui. Horror. Terror. Disgust.
     11. Fin.
+15. Variables and test data cannot be organised sensibly. The interface for this information is a
+    disaster.
 Good features of Postman:
 1. Pleasant UI for running subsets of tests etc
 2. Some good aspects of test report output
