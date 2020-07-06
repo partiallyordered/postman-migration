@@ -78,10 +78,14 @@ const preamble = [
     'const tv4 = require(\'tv4\');',
     'const KJUR = require(\'jsrsasign\')',
     'const assert = require(\'assert\').strict;',
-    'const axios = require(\'axios\');',
+    '// don\'t throw an error on any response code',
+    '// https://github.com/axios/axios#request-config',
+    '// TODO: throw on 500s?',
+    'const axios = require(\'axios\').create({ validateStatus: () => true });',
     'const uuid = require(\'uuid\');',
     'const { createPmSandbox } = require(\'./pm\');',
-    'const pm = createPmSandbox({});',
+    'const { reportsSpec } = require(\'../iteration_data.json\')[0];',
+    'const pm = createPmSandbox(reportsSpec);',
     'const { promisify } = require(\'util\');',
     'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
@@ -350,8 +354,12 @@ const createOrReplaceOutputDir = async (name) => {
             // where timeout is the second argument to setTimeout and body is the function body of
             // the first argument.
             // We're relying on stable array sort here, which became available in node 12. Stable
-            // sort means timeouts that occurred first previously, will still occur first after the
-            // transform.
+            // sort means timeout callbacks with the same timeout will still occur in the same
+            // order after this transformation. E.g.
+            //   setTimeout(callback1, 5000)
+            //   setTimeout(callback2, 5000)
+            // will still result in callback1 occurring before callback2. Without stable array
+            // sort, callback2 could occur before callback1.
             assert(Number(process.versions.node.split('.')[0]) > 11)
             const timeouts = setTimeouts
                 .map((path) => ({
@@ -359,11 +367,6 @@ const createOrReplaceOutputDir = async (name) => {
                     body: path.get('expression').get('arguments').get('0').get('body')
                 }))
                 .sort((a, b) => a.timeout - b.timeout);
-
-            Interaction between here and probably transformPmSendRequestToAsync means we're
-            removing pm.sendRequest calls :(. Maybe something to do with them being immediately
-            before the setTimeoutCalls. Or something to do with the children of some nodes not
-            being refreshed or something.
 
             // Replace the original block statement
             blockStatement.replace(

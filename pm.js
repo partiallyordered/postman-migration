@@ -34,7 +34,10 @@ const createPmSandbox = (reportsSpec) => {
         // command-line (newman) or created with
         // `pm.iterationData.set(key: string, value: any, type: string): function → void`
         iterationData: {
-            get: () => reportsSpec
+            get: (key) => {
+                assert(key === 'reportsSpec', 'This function is written to handle only one key: reportsSpec');
+                return reportsSpec
+            }
         },
 
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmresponse
