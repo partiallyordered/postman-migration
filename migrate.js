@@ -260,12 +260,6 @@ const createOrReplaceOutputDir = async (name) => {
         //
         // Our implementation of the postman sandbox will contain an implementation of
         // pm.sendRequest with this function signature.
-        //
-        // TODO: check that the error is never handled. Here, we're just assuming that
-        // the 'error' parameter that was passed to the pm.sendRequest callback
-        // function wasn't used. We need to be sure of this by trying to find any
-        // identifiers called `error` in the _body_ of these callback functions. (Note
-        // that they _will_ be present in the function parameters).
         const pmRequests = j.find(jsc.CallExpression)
             .filter(callExpressionMatching(/^pm.sendRequest$/));
 
@@ -273,6 +267,21 @@ const createOrReplaceOutputDir = async (name) => {
             // Extract the pm.sendRequest parameters
             // TODO: path.get('arguments').value can probably be path.value.arguments
             const [req, f] = path.get('arguments').value;
+            assert(
+                jsc.Identifier.check(f.params[0]),
+                'Expected first pm.sendRequest callback argument to be an identifier'
+            );
+            // There's no rule about the error parameter not being used in the body, but if we're
+            // sure it isn't in our tests, this makes the transformation easier (we don't need to
+            // transform to
+            //   try { await pm.sendRequest } catch (err) { /* handle */ }
+            // In fact, this could be quite tricky to do automatically if usage of the response and
+            // error were interleaved- everything might have to go in the finally block or some
+            // other horror.
+            assert(
+                0 === jsc(f.body).find(jsc.Identifier).filter((p) => astNodesAreEquivalent(p.value, f.params[0])).length,
+                'Expected the `error` (first) parameter to pm.sendRequest callback not to exist in the body.'
+            );
             // Replace them both with the first one
             path.get('arguments').replace([req]);
             // Replace pm.sendRequest with await pm.sendRequest
@@ -639,7 +648,8 @@ const createOrReplaceOutputDir = async (name) => {
     //   pm.test("Status code is blah", function () {
     //     pm.response.to.have.status(200);
     //   });
-    // TODO: with what? (just add a comment here explaining)
+    // With jest's
+    //   expect(pm.response.status).toBe(200);
     const replaceTestResponse = (j) => {
         // Utilities
         const testResponsePattern = (desc, code) =>
@@ -682,18 +692,16 @@ const createOrReplaceOutputDir = async (name) => {
                 if (astNodesAreEquivalent(path.value, testResponsePattern(desc, code))) {
                     path.replace(
                         jsc.callExpression(
-                            jsc.identifier('assert'),
-                            [
-                                jsc.binaryExpression(
-                                    "===",
-                                    jsc.memberExpression(
-                                        jsc.identifier(axiosResponseVarName), // TODO: gotta determine what this value ("resp") actually is, or use jscodeshift to generate or analyse the axios response identifier
-                                        jsc.identifier('status')
-                                    ),
-                                    jsc.literal(code)
+                            jsc.memberExpression(
+                                jsc.callExpression(
+                                    jsc.identifier('expect'),
+                                    [
+                                        buildNestedMemberExpression([axiosResponseVarName, 'status'])
+                                    ]
                                 ),
-                                jsc.literal(desc)
-                            ]
+                                jsc.identifier('toBe')
+                            ),
+                            [ jsc.literal(code) ]
                         )
                     )
                 }
@@ -780,7 +788,7 @@ const createOrReplaceOutputDir = async (name) => {
             const pmTestCall = elseExpressionStmt.expression;
             assert(pmTestCall.arguments.length === 2);
             const pmTestCallback = pmTestCall.arguments[1];
-            assert(jsc.FunctionExpression.check(pmTestCallback) || jsc.ArrowFunctionExpression.check(pmTestCallback))
+            assert(jsc.Function.check(pmTestCallback));
             assert(pmTestCallback.body.body.length === 1);
             assert(jsc.ThrowStatement.check(pmTestCallback.body.body[0]));
         })
@@ -789,30 +797,6 @@ const createOrReplaceOutputDir = async (name) => {
                 path.value.consequent
             );
         });
-
-
-    // Replace response.json().headers with response.headers
-    const replaceResponseJsonHeaders = (j) => j
-        .find(jsc.MemberExpression)
-        .filter((path) => astNodesAreEquivalent(
-            path.value,
-            jsc.memberExpression(
-                jsc.callExpression(
-                    jsc.memberExpression(
-                        jsc.identifier('response'),
-                        jsc.identifier('json')
-                    ),
-                    []
-                ),
-                jsc.identifier('headers')
-            )
-        ))
-        .forEach((path) => path.replace(
-            jsc.memberExpression(
-                jsc.identifier('response'),
-                jsc.identifier('headers')
-            )
-        ))
 
 
     const assertPmResponseIsReplaced = (j) => assert(0 === j
@@ -946,6 +930,71 @@ const createOrReplaceOutputDir = async (name) => {
         .forEach((path) => path.get('kind').replace('let'));
 
 
+    // Our sandbox implementation of pm.test doesn't do anything with the first argument, but
+    // sometimes when tests fail it functions as a useful comment, so we'll turn it into a comment.
+    const replacePmTest = (j) => {
+        return j
+            .find(jsc.CallExpression)
+            .filter((path) => astNodesAreEquivalent(
+                buildNestedMemberExpression(['pm', 'test']),
+                path.value.callee
+            ))
+            .forEach((path) => {
+                assert(
+                    path.value.arguments.length === 2,
+                    'Expected all calls to pm.test to have exactly two arguments'
+                );
+                const pmTestArgs = path.get('arguments');
+                // toSource- we'll turn the entire arg to a comment string
+                const comment = jsc.commentLine(
+                    ` ${jsc(pmTestArgs.get('0')).toSource().replace(/(^"|"$)/g, '')}`
+                );
+                const callback = pmTestArgs.get('1');
+                assert(
+                    jsc.Function.check(callback.value),
+                    'Expected second argument to pm.test to be a callback'
+                );
+                assert(
+                    callback.value.params.length === 0,
+                    'Expected the callback to pm.test to have zero arguments'
+                );
+                if (jsc(path.get('arguments').get('1').get('body')).find(jsc.VariableDeclaration).length !== 0) {
+                    // We'll put the callback in a block statement to avoid any name clashes
+                    // TODO: instead, write functionality to check for var name clashes in the
+                    // enclosing scope and use it wherever else we have put something in a block
+                    // statement to avoid var name clashes.
+                } else {
+                    // An ArrowFunctionExpression can have an expression as a body. Here we handle
+                    // the case of a BlockStatement as a body
+                    if (jsc.BlockStatement.check(callback.value.body)) {
+                        const callbackBody = callback.get('body').get('body');
+                        if (!Array.isArray(callbackBody.value[0].comments)) {
+                            callbackBody.value[0].comments = [ comment ]
+                        } else {
+                            callbackBody.value[0].comments.push(comment);
+                        }
+                        // Insert the current block before the pm.test call
+                        path.parentPath.insertBefore(...callbackBody.value);
+                    } else {
+                        const callbackBody = callback.get('body');
+                        if (!Array.isArray(callback.value.body.comments)) {
+                            callbackBody.value.comments = [ comment ]
+                        } else {
+                            callbackBody.value.comments.push(comment);
+                        }
+                        // Insert the current block before the pm.test call
+                        path.parentPath.insertBefore(
+                            jsc.expressionStatement(
+                                callbackBody.value
+                            )
+                        )
+                    }
+                }
+            })
+            .remove(); // remove all the pm.test nodes
+    };
+
+
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
     //
@@ -980,21 +1029,11 @@ const createOrReplaceOutputDir = async (name) => {
     notifyUnreplacedVariables(j);
     assertPmVariablesCallsGone(j);
     transformForEachToAwaitPromiseAll(j);
-    // TODO: should we _ever_ do this?
-    // Don't do this: sometimes we get a response back (from the simulators) that contains
-    // _response data_. In other words, response looks like:
-    // {
-    //   headers: { ... }
-    //   data: {
-    //     headers: { ... }
-    //     data: { ... }
-    //   }
-    // }
-    // replaceResponseJsonHeaders(j);
     removeResponseResponseSize(j);
     removeJsRsaSignEvalAndRelatedRubbish(j);
     assertNoEval(j);
     replaceVarWithLet(j);
+    replacePmTest(j);
 
     await fs.writeFile(testFileName, `${preamble}${j.toSource({ tabWidth: 4 })}`);
 
@@ -1106,9 +1145,6 @@ const createOrReplaceOutputDir = async (name) => {
     // 26. Assert that the same number of `it` calls exist before and after the transformation.
     //     (Except where we're getting rid of them deliberately...? So don't bother?)
     //
-    // 27. Consider analysing usage of `var` and applying `const` or `let` where appropriate
-    //     (although, eslint is likely to do this for us, I would think)
-    //
     // 28. Wherever setTimeoutPromise is used we can probably replace it now with sleep, followed
     //     by the setTimeoutPromise callback function. We could also analyse the _purpose_ of
     //     setTimeout and replace it with something more sensible. Likely the wait is occurring
@@ -1134,9 +1170,13 @@ const createOrReplaceOutputDir = async (name) => {
     // 34. Search the code for:
     //       const response = await pm.sendRequest("google.com");
     //
-    // 35. Replace tv4 with ajv (which is faster- might speed tests)
+    // 35. Replace tv4 with ajv (which is faster- might speed tests up)
+    //
+    // 36. Analyse usage of `pm.test.skip`
+
 
     // Examples:
+    //
     // Demonstrate that both declarations of `testfsp3GetStatusRequest` are equivalent (i.e.
     // copy-pasted)
     // const decs = j
@@ -1152,4 +1192,11 @@ const createOrReplaceOutputDir = async (name) => {
     //   jsc(src).find(jsc.VariableDeclaration).remove();
     // Or
     //   jsc(src).find(jsc.VariableDeclaration).forEach(p => p.prune());
+    //
+    // Insert a node before another using insertBefore
+    // Need to ensure the path that insertBefore is called on is a member of an array. From a
+    // CallExpression, for example, this means it's necessary to traverse upward to a child of a
+    // BlockStatement. This is normally an ExpressionStatement with a `.name` that corresponds to
+    // its position in the BlockStatement (an array index, of type string).
+    //   path.parentPath.insertBefore(...callbackBody.value);
 })();
