@@ -66,6 +66,95 @@ const recast = require('recast');
 const environment = new Map(
     require('../environments/Casa-DEV.postman_environment.json').values.map(({ key, value }) => [key, value])
 );
+const set = require('./set');
+
+const nodeTypes = [
+    "Printable",
+    "Node",
+    "SourceLocation",
+    "Position",
+    "File",
+    "Program",
+    "Function",
+    "Statement",
+    "EmptyStatement",
+    "BlockStatement",
+    "ExpressionStatement",
+    "IfStatement",
+    "LabeledStatement",
+    "BreakStatement",
+    "ContinueStatement",
+    "WithStatement",
+    "SwitchStatement",
+    "ReturnStatement",
+    "ThrowStatement",
+    "TryStatement",
+    "CatchClause",
+    "WhileStatement",
+    "DoWhileStatement",
+    "ForStatement",
+    "ForInStatement",
+    "DebuggerStatement",
+    "Declaration",
+    "FunctionDeclaration",
+    "FunctionExpression",
+    "VariableDeclaration",
+    "VariableDeclarator",
+    "Expression",
+    "ThisExpression",
+    "ArrayExpression",
+    "ObjectExpression",
+    "Property",
+    "SequenceExpression",
+    "UnaryExpression",
+    "BinaryExpression",
+    "AssignmentExpression",
+    "UpdateExpression",
+    "LogicalExpression",
+    "ConditionalExpression",
+    "NewExpression",
+    "CallExpression",
+    "MemberExpression",
+    "Pattern",
+    "SwitchCase",
+    "Identifier",
+    "Literal",
+    "Comment",
+    "Property",
+    "ObjectMethod",
+    "ObjectProperty",
+    "SpreadProperty",
+    "SpreadElement",
+    "MethodDefinition",
+    "VariableDeclarator",
+    "ClassPropertyDefinition",
+    "ClassProperty",
+    "ClassPrivateProperty",
+    "ClassMethod",
+    "ClassPrivateMethod",
+    "Property",
+    "PropertyPattern",
+    "SpreadPropertyPattern",
+    "SpreadProperty",
+    "ObjectProperty",
+    "RestProperty",
+    "MethodDefinition",
+    "VariableDeclarator",
+    "ClassPropertyDefinition",
+    "ClassProperty",
+    "MethodDefinition",
+    "VariableDeclarator",
+    "ClassPropertyDefinition",
+    "ClassProperty",
+];
+
+// So we can do this:
+//   jsc(src).find(jsc.Identifier).filter(chk.VariableDeclaration)
+// Instead of:
+//   jsc(src).find(jsc.Identifier).filter((node) => jsc.VariableDeclaration.check(node))
+const chk = Object.assign({}, ...nodeTypes.map(key => ({ [key]: jsc[key].check.bind(jsc[key]) })));
+const asrt = Object.assign({}, ...nodeTypes.map(key => ({ [key]: jsc[key].assert.bind(jsc[key]) })));
+const not = (f) => (...args) => !f(...args);
 
 const axiosResponseVarName = 'resp';
 // TODO: convert this to ast-types? That way we can, for example, refer to setTimeoutPromiseName as
@@ -150,6 +239,41 @@ const createOrReplaceOutputDir = async (name) => {
         return `[${getPos(astValue)}]: ${src.slice(start, end)}`;
     };
 
+    const astTypesInScope = (path, astType) => jsc(path.scope.path)
+        .find(astType)
+        .filter((p) => p.scope === path.scope);
+
+    // Given a path, find all identifiers in the same scope that are not object properties. I.e.
+    // any identifier in the same scope that would result in a name clash or shadow if a variable
+    // was declared with the same name in that scope. For this code:
+    //   () => {
+    //     let x;
+    //     const f = () => {}
+    //     setTimeout(f, 2000, x);
+    //   }
+    // we would return
+    //   new Set('x', 'f', 'setTimeout')
+    // because if we were to declare any of these names in the scope displayed, the name would
+    // clash with (x, f) or shadow (setTimeout) another.
+    const identifiersInSameScope = (path) => {
+        const isMemberExpressionProperty = (path) =>
+               jsc.MemberExpression.check(path.parentPath.value)
+            && path.parentPath.value.property === path.value;
+        return new Set(
+            astTypesInScope(path, jsc.Identifier)
+                .filter(not(isMemberExpressionProperty))
+                .nodes()
+                .map(n => n.name)
+        );
+    };
+
+    const appendComment = (node, comment) => {
+        if (!Array.isArray(node.comments)) {
+            node.comments = [ comment ]
+        } else {
+            node.comments.push(comment);
+        }
+    }
 
     // Ensure all pm.sendRequest calls are HTTP GET requests made with a POJO as the first
     // argument.
@@ -958,30 +1082,38 @@ const createOrReplaceOutputDir = async (name) => {
                     callback.value.params.length === 0,
                     'Expected the callback to pm.test to have zero arguments'
                 );
-                if (jsc(path.get('arguments').get('1').get('body')).find(jsc.VariableDeclaration).length !== 0) {
-                    // We'll put the callback in a block statement to avoid any name clashes
-                    // TODO: instead, write functionality to check for var name clashes in the
-                    // enclosing scope and use it wherever else we have put something in a block
-                    // statement to avoid var name clashes.
+
+                // Check whether there are any name clashes between the callback body and the scope
+                // that encloses the `pm.test` call.
+                const pmTestCallbackBody = path.get('arguments').get('1').get('body');
+                const bodyVariablesDeclared = new Set(
+                    astTypesInScope(pmTestCallbackBody, jsc.VariableDeclarator)
+                        .map((p) => p.get('id'))
+                        .nodes()
+                        .map(n => n.name)
+                );
+                const identifiersInPmTestScope = identifiersInSameScope(path);
+                const nameClashes = set.intersection(bodyVariablesDeclared,
+                    identifiersInPmTestScope);
+                // If there are name clashes between the callback body and the scope that encloses
+                // the `pm.test` call, we'll put the callback body into a block statement.
+                // Otherwise, we'll replace the `pm.test` call with its contents.
+                if (nameClashes.size !== 0) {
+                    path.replace(
+                        callback.get('body').value
+                    );
+                    appendComment(path.value, comment);
                 } else {
                     // An ArrowFunctionExpression can have an expression as a body. Here we handle
                     // the case of a BlockStatement as a body
                     if (jsc.BlockStatement.check(callback.value.body)) {
                         const callbackBody = callback.get('body').get('body');
-                        if (!Array.isArray(callbackBody.value[0].comments)) {
-                            callbackBody.value[0].comments = [ comment ]
-                        } else {
-                            callbackBody.value[0].comments.push(comment);
-                        }
+                        appendComment(callbackBody.value[0], comment);
                         // Insert the current block before the pm.test call
                         path.parentPath.insertBefore(...callbackBody.value);
                     } else {
                         const callbackBody = callback.get('body');
-                        if (!Array.isArray(callback.value.body.comments)) {
-                            callbackBody.value.comments = [ comment ]
-                        } else {
-                            callbackBody.value.comments.push(comment);
-                        }
+                        appendComment(callbackBody.value, comment);
                         // Insert the current block before the pm.test call
                         path.parentPath.insertBefore(
                             jsc.expressionStatement(
@@ -1173,6 +1305,9 @@ const createOrReplaceOutputDir = async (name) => {
     // 35. Replace tv4 with ajv (which is faster- might speed tests up)
     //
     // 36. Analyse usage of `pm.test.skip`
+    //
+    // 37. Wrap axios for the "request" part of the test? This way we can add behaviour (i.e.
+    //     logging) more easily.
 
 
     // Examples:
