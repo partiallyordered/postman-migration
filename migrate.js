@@ -201,7 +201,8 @@ const axiosResponseVarName = 'resp';
 const setTimeoutPromiseName = 'setTimeoutPromise';
 const preamble = [
     'const tv4 = require(\'tv4\');',
-    'const KJUR = require(\'jsrsasign\')',
+    'const moment = require(\'moment\');',
+    'const KJUR = require(\'jsrsasign\');',
     'const assert = require(\'assert\').strict;',
     '// don\'t throw an error on any response code',
     '// https://github.com/axios/axios#request-config',
