@@ -73,6 +73,22 @@ const recast = require('recast');
 // `notifyUnreplacedVariables`. I.e. when you run this script, a message may be printed indicating
 // there are unreplaced environment or local variables. You may search your source code and find
 // that those are set dynamically, then add them to this array.
+//
+// If you have a lot of these variables, you might have to replace the implementation of
+// pm.environment.get in the sandbox here with one that behaves more similarly to the postman
+// implementation, which does this:
+// 1. Is the variable present in the "variables"? If yes, return, if not, go to (2).
+// 2. Is the variable present in "iteration data" variables? If yes, return, if not, go to (3).
+// 3. Is the variable present in "environment" variables? If yes, return, if not, go to (4).
+// 4. Is the variable present in "collection" variables? If yes, return, if not, go to (5).
+// 5. Is the variable present in "global" variables? If yes, return, if not, go to (6).
+// 6. Was the variable embedded in a string, for example 'This is a "postman variable":
+//    {{variableName}}'? If so, return the string, i.e. '{{variableName}}'. If not, go to (7).
+// 7. I think Postman fails silently here and returns an empty string. But as an implementer of
+//    this function, you should throw an error.
+//
+// See here for more on postman variables:
+// https://learning.postman.com/docs/sending-requests/variables/#variable-scopes
 const envWhitelist = [
     'EURGHSChannelId',
     'RWFUGXChannelId',
