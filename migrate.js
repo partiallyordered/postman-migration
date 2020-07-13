@@ -63,9 +63,29 @@ const jsc = require('jscodeshift');
 const { transformCollection, convertRequest } = require('./transformCollection');
 const assert = require('assert').strict;
 const recast = require('recast');
-const environment = new Map(
-    require('../environments/Casa-DEV.postman_environment.json').values.map(({ key, value }) => [key, value])
-);
+// Whitelist these environment variables. Add to this array are variables that are set dynamically,
+// for example:
+//     pm.environment.set(someVariableContainingAValue, someData);
+// more specifically:
+//     const result = pm.sendRequest('blah');
+//     pm.environment.set(result.json().key, result.json().value);
+// You might identify these variables as being printed by the "transformation"
+// `notifyUnreplacedVariables`. I.e. when you run this script, a message may be printed indicating
+// there are unreplaced environment or local variables. You may search your source code and find
+// that those are set dynamically, then add them to this array.
+const envWhitelist = [
+    'EURGHSChannelId',
+    'RWFUGXChannelId',
+    'RWFZMWChannelId',
+    'UGXRWFChannelId',
+    'UGXZMWChannelId',
+    'ZMWRWFChannelId',
+    'ZMWUGXChannelId',
+];
+const environment = new Map([
+    ...require('../environments/Casa-DEV.postman_environment.json').values.map(({ key, value }) => [key, value]),
+    ...envWhitelist.map((v) => ([v, undefined])) // map to the [key,value] format expected by the constructor
+]);
 const set = require('./set');
 
 const nodeTypes = [
@@ -592,8 +612,6 @@ const createOrReplaceOutputDir = async (name) => {
             .find(jsc.CallExpression)
             .filter((p) => jsc.Identifier.check(p.value.callee))
             .filter((p) => /^it$/.test(p.value.callee.name))
-            // .at(39)
-            // .forEach((p) => console.log(jsc(p).toSource()))
             .forEach((itCallExpression) => {
                 // For each `pm.variables.set` in the `it` call, get all postman variable literals and
                 // `pm.variables.get` and replace them with `locals.VAR_NAME`
@@ -735,20 +753,26 @@ const createOrReplaceOutputDir = async (name) => {
     // TODO: this needs to look in template literals also
     const notifyUnreplacedVariables = (j) => {
         console.log('Found the following variable-like strings that have not been replaced with pm.environment.get or local variables:');
-        j.find(jsc.Literal)
+        const matchesInLiterals = j.find(jsc.Literal)
             .filter((path) =>
                 typeof path.value.value === 'string' && pmVariableRegex.test(path.value.value)
             )
             .map((path) => path.get('value'))
             .nodes()
-            .map(n => [...n.matchAll(pmVariableRegex)]) // get all matches
-            // .forEach(n => console.log(n))
-            .reduce((acc, cv) => [...acc, ...cv]) // flatten our array of arrays of matches into an array of matches
+            .map(n => [...n.matchAll(pmVariableRegex)]); // get all matches
+
+        const matchesInTemplateLiterals = j.find(jsc.TemplateElement)
+            .filter((path) => pmVariableRegex.test(path.value.value.raw)) //.some((q) => pmVariableRegex.test(q)))
+            .map((path) => path.get('value'))
+            .nodes()
+            .map(n => [...n.raw.matchAll(pmVariableRegex)]);
+
+        [...matchesInLiterals, ...matchesInTemplateLiterals]
+            .reduce((acc, cv) => [...acc, ...cv]) // flatten our _array of arrays of matches_ into an _array of matches_
             .map(m => m[0]) // take the first element of each match, the matched string
             .sort()
             .reduce((acc, cv) => acc.includes(cv) ? acc : [...acc, cv], []) // remove duplicates
             .forEach(mStr => console.log(mStr));
-            // .forEach(pmVarName => console.log(pmVarName));
     };
 
 
