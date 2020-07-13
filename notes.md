@@ -191,7 +191,7 @@ Take a migration all the way through to Majestic
 Shortcomings of Postman:
 0. Is there any serious organisation that uses postman for automated testing? No, that's because of
    the following.
-1. Impossible to diff, version control, peer review
+1. Impossible to diff, version control, peer review. Example: https://github.com/casablanca-project/test-scripts/pull/167/files
 2. Global state shared between tests
 3. Code reuse is difficult and painful
     * it's difficult to factor repeated code into a function for reuse elsewhere in the tests
