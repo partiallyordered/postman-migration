@@ -83,6 +83,19 @@ const createPmSandbox = (reportsSpec) => {
             // these types of auth.
             const headers = request.header || undefined;
 
+
+            const handleBody = (body) => {
+                if (!body) {
+                    return body;
+                }
+                // Body modes:
+                // https://github.com/postmanlabs/postman-collection/blob/485ff3209c3368ccd64c06c6b11f94f3e27f82f9/lib/collection/request-body.js#L219-L225
+                if (body.mode !== 'raw') {
+                    throw new Error('Unhandled postman request body mode');
+                }
+                return JSON.parse(body.raw);
+            }
+
             const config = typeof request === 'string'
                 ? {
                     method: 'get',
@@ -93,13 +106,16 @@ const createPmSandbox = (reportsSpec) => {
                     method: request.method,
                     url: request.url,
                     headers,
-                    data: request.data,
+                    data: handleBody(request.body),
                 };
 
             const response = await axios(config);
             const result = {
                 data: response.data,
+                // Sometimes the tests use .code, sometimes .status. I can't see that there's a
+                // distinction.
                 status: response.status,
+                code: response.status,
                 headers: response.headers,
                 statusText: response.statusText,
                 json: () => response.data,
