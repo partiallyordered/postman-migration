@@ -1,5 +1,5 @@
 
-Method
+### Method
 1. Recurse the collection
 2. Categorise all "item" instances as either leaf or non-leaf nodes.
 3. Categorise all leaf nodes as those that had requests and those that did not have requests. All
@@ -188,7 +188,7 @@ Documentation for the collection schema:
 
 Take a migration all the way through to Majestic
 
-Shortcomings of Postman:
+### Shortcomings of Postman:
 0. Is there any serious organisation that uses postman for automated testing? No, that's because of
    the following.
 1. Impossible to diff, version control, peer review. Example: https://github.com/casablanca-project/test-scripts/pull/167/files
