@@ -48,8 +48,8 @@ Postman is used as
 ### Jest
 
 #### What is Jest?
-Jest is a very popular and maintained Javascript test runner. Users write Javascript tests in the
-following style:
+Jest is a very popular and maintained Javascript test runner. Users write Javascript tests in a
+style very similar to a range of other runners such as _Ava_ and _Mocha_. An example:
 ```javascript
 describe('Quoting service', () => {
     it('quotes stuff', () => {
