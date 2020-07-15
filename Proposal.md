@@ -15,6 +15,8 @@ It is assumed the reader is familiar with broader Mojaloop terminology. There is
 
 ## Table of Contents
 - [Background](#background)
+    - [Postman](#postman)
+    - [Jest](#jest)
 - [Motivation](#motivation)
     - [Summary](#summary)
     - [Detail](#detail)
@@ -22,6 +24,8 @@ It is assumed the reader is familiar with broader Mojaloop terminology. There is
 - [Glossary](#glossary)
 
 ## Background
+
+### Postman
 
 #### What is Postman?
 Postman calls itself _The Collaboration Platform for API Development_. Postman allows users to
@@ -40,6 +44,29 @@ Postman is used as
 
 #### Implementation
 - TODO: why was Postman selected? better than Cucumber or something? flexible?
+
+### Jest
+
+#### What is Jest?
+Jest is a very popular and maintained Javascript test runner. Users write Javascript tests in the
+following style:
+```javascript
+describe('Quoting service', () => {
+    it('quotes stuff', () => {
+        const expectedResult = 'A quote';
+        const result = getQuote();
+        expect(result).toBe(expectedResult);
+    });
+});
+```
+Users typically run test suites as follows:
+```sh
+npm run test
+```
+It is reasonably easy to run a single file or a single test using CLI parameters.  
+Output is presented as follows:
+![jest-results](./jest-example.png)
+Jest supports a range of output formats.
 
 ## Motivation
 This section details the motivation for this proposal. It will discuss shortcomings of Postman.
