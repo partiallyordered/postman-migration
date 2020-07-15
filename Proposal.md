@@ -66,7 +66,9 @@ npm run test
 ```
 It is reasonably easy to run a single file or a single test using CLI parameters.  
 Output is presented as follows:
+
 ![jest-results](./jest-example.png)
+
 Jest supports a range of output formats.
 
 ## Motivation
