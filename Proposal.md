@@ -48,8 +48,9 @@ Postman is used as
 ### Jest
 
 #### What is Jest?
-Jest is a very popular and maintained Javascript test runner. Users write Javascript tests in a
-style very similar to a range of other runners such as _Ava_ and _Mocha_. An example:
+Jest is a very popular and well-maintained Javascript test runner, mocking framework and assertion
+library. Users write Javascript tests in a style very similar to a range of other runners such as
+_Ava_ and _Mocha_. An example:
 ```javascript
 describe('Quoting service', () => {
     it('quotes stuff', () => {
