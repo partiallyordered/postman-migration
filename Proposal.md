@@ -14,12 +14,12 @@ It is assumed the reader is familiar with broader Mojaloop terminology. There is
 [Glossary](#glossary) for definitions relevant to this document in particular.
 
 ## Table of Contents
-[Background](#background)
-[Motivation](#motivation)
-  [Summary](#summary)
-  [Detail](#detail)
-[A Way Forward](#a-way-forward)
-[Glossary](#glossary)
+- [Background](#background)
+- [Motivation](#motivation)
+    - [Summary](#summary)
+    - [Detail](#detail)
+- [A Way Forward](#a-way-forward)
+- [Glossary](#glossary)
 
 ## Background
 
