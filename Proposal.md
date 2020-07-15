@@ -1,4 +1,4 @@
-# Migrate Test Suites to Javascript from Postman
+# Migrate Test Suites from Postman to Javascript
 
 This proposal outlines a vision for a new role for Postman in Mojaloop and Mowali. This document
 gives a background on Postman and its use in these projects. It discusses shortcomings with Postman
