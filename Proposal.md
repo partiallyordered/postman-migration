@@ -2,9 +2,11 @@
 
 This proposal outlines a vision for a new role for Postman in Mojaloop and Mowali. This document
 gives a background on Postman and its use in these projects. It discusses shortcomings with Postman
-and its use. It proposes that the Mojaloop project and test suite have outgrown Postman. As a
-solution, it proposes an automatic migration path from Postman to the open-source Javascript test
-runner, _Jest_.
+and its use. It proposes that the Mojaloop project and test suite have outgrown Postman, and that
+Postman is a barrier to community contribution. As a solution, it proposes an automatic migration
+path from Postman to the open-source Javascript test runner, _Jest_. This retains _all_ of the
+excellent work done on the existing test suites, and allows the suite to continue to grow with the
+project.
 
 Intended readers are
 * users of Postman within Mojaloop and associated projects
@@ -42,9 +44,6 @@ Postman is used as
 2. A suite of tests for developers and testers to run against Mojaloop interactively.
 3. A suite of tests to run in CI environments.
 
-#### Implementation
-- TODO: why was Postman selected? better than Cucumber or something? flexible?
-
 ### Jest
 
 #### What is Jest?
@@ -73,6 +72,7 @@ Jest supports a range of output formats.
 
 ## Motivation
 This section details the motivation for this proposal. It will discuss shortcomings of Postman.
+None of these shortcomings exist in Jest.
 
 ### Summary
 - Mojaloop has outgrown Postman
@@ -91,6 +91,17 @@ This section details the motivation for this proposal. It will discuss shortcomi
     requires timeouts and polling to work around this, resulting in unreliable tests. It is not
     practical to use the wider Javascript ecosystem to improve the quality and consistency of the
     tests due to the limitations of the Postman sandbox.
+
+|                                | Jest | Postman |
+| ------------------------------ | ---- | ------- |
+| Access to Javascript ecosystem | ✓    | ✗       |
+| Consistency of execution in CI | ✓    | ✗       |
+| Easy code merges               | ✓    | ✗       |
+| Easy peer reviews              | ✓    | ✗       |
+| Easy sharing of configuration  | ✓    | ✓       |
+| Good support for code reuse    | ✓    | ✗       |
+| Interactive API exploration    | ✗    | ✓       |
+| User interface                 | ✗    | ✓       |
 
 ### Detail
 
@@ -124,6 +135,12 @@ retrieve said code (stringified in a JSON file) in Postman environment files, or
 using an HTTP request from Postman. In both cases, that code must then be executed in the Postman
 environment using `eval` (a security risk in certain contexts).
 
+Additionally, similar tests must be duplicates. If a user wishes to write five tests of similar API
+calls, with the same assertions, they must create five nearly-identical duplicates of the test. For
+example, one may wish to simply validate responses from five different currency endpoints, e.g.
+`/EUR` `/USD` `/RMB` `/GBP` `/CAD`. This would require five duplicated tests. In Jest, we would
+call a function with five different arguments, writing the code only once.
+
 Because code reuse is so difficult, users resort to one of the following options:
 1. **Copying and pasting to achieve reuse**. This leads to a huge maintenance burden and a rapidly
     increasing error rate in the tests, as test authors must duplicate changes in multiple places
@@ -150,12 +167,22 @@ normal development environment or programming language. Some examples:
     transformation is not accessible to tests written with Postman.
 - Postman supports a much more limited range of output formats and integrations than
     the wider Javascript ecosystem.
+- Postman development is limited to the Postman IDE. This contains a passable code editor and a
+    console for debugging. Jest users have available to them an enormous suite of development and
+    debug tools produced by perhaps the most active development community in the world.
 
 #### Javascript Skills
 Javascript experience is required to work on Mojaloop effectively. It is an increasingly common
 skill set and is highly available in the market. Much more so than Postman skills. Tests written
 targeting a commonly-used Javascript runner would be more accessible to prospective users of and
 contributors to Mojaloop.
+
+#### Environmental Consistency
+Postman has a corresponding runner for executing collections in CI environments, _Newman_. This
+mostly works, but there are some differences in the behaviour of the sandbox between Postman and
+Newman. These are likely bugs. The consequence is that tests will behave differently in the Postman
+UI and when run with Newman. This has been observed to be the source of test failures that have
+been very difficult to diagnose.
 
 #### Postman Skills
 Postman introduces a sandbox and "scripting" model with
@@ -169,18 +196,14 @@ desirable skill than Javascript and therefore staff are likely to buy in less.
 ### Test Suites
 This document proposes that all usage of Postman for automated testing should be replaced by Jest.
 A tool exists to automatically convert Postman tests to Jest Javascript tests. It has been
-successfully used to convert the entire Mowali Postman test suite. It does not produce perfect
-code, but it produces code that can be much more easily maintained, refactored and improved than
-Postman collections.
+successfully used to convert and execute the entire Mowali Postman test suite. It does not produce
+perfect code, but it produces code that can be much more easily maintained, refactored and improved
+than Postman collections.
 
 ### Postman's Role
 This document proposes one use for Postman as a UI for the Mojaloop admin API, and the FSPIOP API.
 The Mojaloop project should scale back its usage of Postman to provide an example set of requests
 against these APIs to enable interactive testing and usage of Mojaloop and FSPIOP functionality.
-
-One limitation of this proposal is the asynchronous nature of the FSPIOP API. Postman is not
-well-suited to this type of interface and it may not be useful for this task. In this case, it
-may still be deemed useful as an interface to the Mojaloop admin API, for system operators and QA.
 
 ## Glossary
 
