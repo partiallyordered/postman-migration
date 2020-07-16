@@ -88,9 +88,9 @@ This section details the motivation for this proposal. It will discuss shortcomi
     diffs. This is the largest usage of Postman in Mojaloop.
 - The test suite will grow increasingly flaky as it increases in size. This is fundamentally
     because of Postman's inability to handle the asynchronous nature of the FSPIOP API. Postman
-    requires timeouts and polling to work around this. It is not practical to use the wider
-    Javascript ecosystem to improve the quality and consistency of the tests due to the limitations
-    of the Postman sandbox.
+    requires timeouts and polling to work around this, resulting in unreliable tests. It is not
+    practical to use the wider Javascript ecosystem to improve the quality and consistency of the
+    tests due to the limitations of the Postman sandbox.
 
 ### Detail
 
