@@ -158,7 +158,8 @@ Postman limits users to the functionality provided in [its sandbox](https://lear
 It is difficult at best to leverage the wider ecosystem of tools and libraries available to a
 normal development environment or programming language. Some examples:
 - In Mowali it was not feasible to write some tests using Postman, due to reliance on external
-    libraries to set Kubernetes system state, or access SFTP directories.
+    libraries to set Kubernetes system state, access SFTP directories, or parse data formats not
+    supported by Postman (XLSX).
 - In Mowali it was necessary to use a branch of newman in order to use more than one TLS
     certificate.
 - Postman does not support websockets and therefore cannot utilise, for example, [this PR](https://github.com/mojaloop/sdk-scheme-adapter/pull/185).
