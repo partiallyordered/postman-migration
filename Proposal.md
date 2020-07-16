@@ -184,7 +184,8 @@ may still be deemed useful as an interface to the Mojaloop admin API, for system
 
 ## Glossary
 
-| ---             | --- |
+| Word            | Definition                          |
+| --------------- | ----------------------------------- |
 | Postman         | See [What is Postman?](#what-is-postman). https://www.postman.com/ |
 | Collection      | A suite of tests written in Postman |
 | Environment     | A configuration file for Postman    |
