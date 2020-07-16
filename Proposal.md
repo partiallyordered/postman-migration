@@ -11,7 +11,7 @@ Intended readers are
 * Mojaloop and Postman test authors and QA personnel
 
 It is assumed the reader is familiar with broader Mojaloop terminology. There is a small
-[Glossary](#glossary) for definitions relevant to this document in particular.
+[glossary](#glossary) for definitions relevant to this document in particular.
 
 ## Table of Contents
 - [Background](#background)
