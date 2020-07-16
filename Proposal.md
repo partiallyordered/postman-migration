@@ -105,7 +105,7 @@ None of these shortcomings exist in Jest.
 
 ### Detail
 
-#### Peer review
+#### Peer Review
 Because version controlling Postman collections and environments results in very hard-to-read
 diffs, it's very difficult to peer review changes to collections and environments.
 
@@ -128,7 +128,7 @@ other changes land in the main branch in the interim, it is exceedingly difficul
 sets of changes. This makes it impossible to maintain a fork for longer-lived differences- a
 frequent requirement during development.
 
-#### Code reuse
+#### Code Reuse
 Postman makes code reuse very difficult. To share code between tests, one must store and retrieve
 these as Postman variables or environment. To use code from outside of Postman, one may set and
 retrieve said code (stringified in a JSON file) in Postman environment files, or retrieve this code
@@ -157,6 +157,8 @@ Because code reuse is so difficult, users resort to one of the following options
 Postman limits users to the functionality provided in [its sandbox](https://learning.postman.com/docs/writing-scripts/script-references/postman-sandbox-api-reference/).
 It is difficult at best to leverage the wider ecosystem of tools and libraries available to a
 normal development environment or programming language. Some examples:
+- In Mowali it was not feasible to write some tests using Postman, due to reliance on external
+    libraries to set Kubernetes system state, or access SFTP directories.
 - In Mowali it was necessary to use a branch of newman in order to use more than one TLS
     certificate.
 - Postman does not support websockets and therefore cannot utilise, for example, [this PR](https://github.com/mojaloop/sdk-scheme-adapter/pull/185).
