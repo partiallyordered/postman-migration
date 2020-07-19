@@ -84,6 +84,8 @@ None of these shortcomings exist in Jest.
         code reuse within Postman collections.
     - Test maintenance will become a rapidly increasing burden as the test suite grows due to the
         difficulty of code reuse within Postman collections.
+    - Test execution duration will grow unreasonably, especially as Postman provides no facility
+        for concurrent test execution.
 - Quality assurance is fundamentally impossible due to difficulty reviewing Postman collection
     diffs. This is the largest usage of Postman in Mojaloop.
 - The test suite will grow increasingly flaky as it increases in size. This is fundamentally
@@ -95,6 +97,7 @@ None of these shortcomings exist in Jest.
 |                                | Jest | Postman |
 | ------------------------------ | ---- | ------- |
 | Access to Javascript ecosystem | ✓    | ✗       |
+| Concurrent test execution      | ✓    | ✗       |
 | Consistency of execution in CI | ✓    | ✗       |
 | Easy code merges               | ✓    | ✗       |
 | Easy peer reviews              | ✓    | ✗       |
@@ -157,6 +160,9 @@ Because code reuse is so difficult, users resort to one of the following options
 Postman limits users to the functionality provided in [its sandbox](https://learning.postman.com/docs/writing-scripts/script-references/postman-sandbox-api-reference/).
 It is difficult at best to leverage the wider ecosystem of tools and libraries available to a
 normal development environment or programming language. Some examples:
+- Postman runs tests sequentially. It is possible to initiate multiple parallel sets of tests from
+    _outside_ Postman, using operating system functionality. This means that if one wishes to run
+    tests concurrently, collections must be structured to accommodate this limitation.
 - In Mowali it was not feasible to write some tests using Postman, due to reliance on external
     libraries to set Kubernetes system state, access SFTP directories, or parse data formats not
     supported by Postman (XLSX).
