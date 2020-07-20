@@ -3,6 +3,7 @@
 // - How to verify the transformation is correct?
 //   - Count assertions?
 //   - Count tests (i.e. `it` blocks)?
+//   - Run tests
 // - _Create files_. The current file is way too big to run practically. Note that ast-types has a
 //    fileBuilder. This might be useful. (At the time of writing, I know nothing about it beyond
 //    its existence).
@@ -18,7 +19,6 @@
 //   - https://slacker.ro/2019/04/04/automating-the-migration-of-lodash-to-lodash-es-in-a-large-codebase-with-jscodeshift/
 //   - https://skovy.dev/jscodeshift-custom-transform/
 // - lint-fix?
-// - jest serial mode
 // - postman bundled libraries and "sandbox" API:
 //   https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/
 //   https://github.com/postmanlabs/postman-sandbox
@@ -62,7 +62,6 @@ const fs = require('fs').promises;
 const jsc = require('jscodeshift');
 const { transformCollection, convertRequest } = require('./transformCollection');
 const assert = require('assert').strict;
-const recast = require('recast');
 // Whitelist these environment variables. Add to this array are variables that are set dynamically,
 // for example:
 //     pm.environment.set(someVariableContainingAValue, someData);
@@ -217,6 +216,7 @@ const preamble = [
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
     'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
     'const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));',
+    'const ws = require(\'ws\');',
 ].join('\n');
 
 const createOrReplaceOutputDir = async (name) => {
@@ -249,7 +249,21 @@ const createOrReplaceOutputDir = async (name) => {
     // Next: write something to determine the lowest shared scope. Seems `path` types have a `.scope`
     // property.
     // Usage: astNodesAreEquivalent(path1.value, path2.value)
-    const astNodesAreEquivalent = recast.types.astNodesAreEquivalent;
+    const astNodesAreEquivalent = (...args) => {
+        const equiv = jsc.types.astNodesAreEquivalent;
+        const resolveNode = (nodeOrPath) => nodeOrPath instanceof jsc.types.NodePath ? nodeOrPath.value : nodeOrPath;
+        if (args.length === 0) {
+            return equiv(...args);
+        }
+        if (args.length === 1) {
+            // Return a partially evaluated expression
+            return (...argsPartial) => astNodesAreEquivalent(
+                ...args,
+                ...argsPartial
+            );
+        }
+        return equiv(resolveNode(args[0]), resolveNode(args[1]));
+    };
 
     // TODO: performance: this function is fairly slow
     // TODO: this should probably either incorporate the .find method, so the user does not have to
@@ -270,11 +284,8 @@ const createOrReplaceOutputDir = async (name) => {
         );
 
     // Print the source code of a given expression
-    const summarise = (astValue) => {
-        const getPos = (astValue) => `L${astValue.loc.start.line} C${astValue.loc.start.column}`;
-        const { start, end } = astValue;
-        return `[${getPos(astValue)}]: ${src.slice(start, end)}`;
-    };
+    const summarise = (nodeOrPath) => jsc(nodeOrPath).toSource();
+    const prettyPrint = (nodeOrPath) => console.log(summarise(nodeOrPath));
 
     const astTypesInScope = (path, astType) => jsc(path.scope.path)
         .find(astType)
@@ -496,11 +507,13 @@ const createOrReplaceOutputDir = async (name) => {
     //      {
     //        console.log('executed after ~1000ms');
     //      }
-    const isSetTimeoutExpressionStatement = (node) =>
-           jsc.ExpressionStatement.check(node)
-        && jsc.CallExpression.check(node.expression)
-        && jsc.Identifier.check(node.expression.callee)
-        && node.expression.callee.name === 'setTimeout'
+    const isSetTimeoutExpressionStatement = (nodeOrPath) => {
+        const node = (nodeOrPath instanceof jsc.types.NodePath) ? nodeOrPath.value : nodeOrPath;
+        return jsc.ExpressionStatement.check(node)
+            && jsc.CallExpression.check(node.expression)
+            && jsc.Identifier.check(node.expression.callee)
+            && node.expression.callee.name === 'setTimeout'
+    }
 
     const replaceSetTimeout = (j) => j
         .find(jsc.BlockStatement)
@@ -510,7 +523,7 @@ const createOrReplaceOutputDir = async (name) => {
             // at its top level.
 
             const blockStatementBody = blockStatement.get('body');
-            const setTimeouts = blockStatementBody.filter((p) => isSetTimeoutExpressionStatement(p.value));
+            const setTimeouts = blockStatementBody.filter(isSetTimeoutExpressionStatement);
 
             // Assert setTimeout calls each have only two arguments supplied. This makes our job a
             // little easier.
@@ -542,7 +555,7 @@ const createOrReplaceOutputDir = async (name) => {
             blockStatement.replace(
                 jsc.blockStatement([
                     // original block statement body, no setTimeouts
-                    ...blockStatementBody.value.filter((p) => !isSetTimeoutExpressionStatement(p)),
+                    ...blockStatementBody.value.filter((n) => !isSetTimeoutExpressionStatement(n)),
                     // our new code that consists of sleeps + the old setTimeout callback bodies
                     ...timeouts
                         .map(({ timeout, body }) => [
@@ -1168,6 +1181,75 @@ const createOrReplaceOutputDir = async (name) => {
     };
 
 
+    // Where the following rough pattern exists:
+    //   setTimeout(() => {
+    //     const response = await pm.sendRequest(`http://${simulatorTestEndpoint}`);
+    //     pm.expect(response).to('blah blah blah');
+    //     // assertions
+    //   }, timeout)
+    // We replace it with this:
+    //   const ws = new WebSocket(`ws://${simulatorTestEndpoint}`);
+    //   const response = await new Promise((resolve) => ws.on('message', resolve));
+    //   pm.expect(response).to('blah blah blah');
+    //
+    // At the time of writing, only where there is only a single request to a simulator test
+    // endpoint.
+    const replaceTimeoutsWithWebSockets = (j) => {
+        const getPmSendRequestExpressions = (nodeOrPath) => jsc(nodeOrPath)
+            .find(jsc.MemberExpression)
+            .filter(astNodesAreEquivalent(buildNestedMemberExpression(['pm', 'sendRequest'])))
+        return j
+            .find(jsc.BlockStatement)
+            // Get the setTimeout calls from within the block statements
+            .map((path) =>
+                    [...Array(path.value.body.length).keys()]
+                        .map((i) => path.get('body').get(`${i}`))
+                        .filter(isSetTimeoutExpressionStatement)
+            )
+            // Filter out any setTimeout calls where the callback function body contains more than one
+            // pm.sendRequest call
+            .filter((setTimeoutExprStmt) =>
+                getPmSendRequestExpressions(setTimeoutExprStmt).length === 1
+            )
+            // Filter out any setTimeout calls where the pm.sendRequest argument looks like an
+            // object. Most of the ones we're interested in look like:
+            //   pm.sendRequest(pm.environment.get("TESTFSP3_SDK_INBOUND_URL")+"/callbacks/"+pm.variables.get("quoteId"))
+            .filter((setTimeoutExprStmt) =>
+                getPmSendRequestExpressions(setTimeoutExprStmt)
+                    .some((p) => not(chk.Identifier)(p.parentPath.value.arguments[0]))
+            )
+            // Filter out any setTimeout calls where the argument isn't obviously to a simulator
+            // test endpoint. We ascertain this by looking for a string literal that contains the
+            // text 'callbacks' or 'requests'.
+            .filter((setTimeoutExprStmt) =>
+                getPmSendRequestExpressions(setTimeoutExprStmt)
+                    .map((p) => p.parentPath.get('arguments').get('0'))
+                    .some((p) => jsc(p)
+                        .find(jsc.Literal)
+                        .some((p) => /(callbacks|requests)/.test(p.value.value))
+                    )
+            )
+            .at(0)
+            .forEach((setTimeoutExprStmt) => {
+                // We're going to
+                // 1. get the argument to the pm.sendRequest call, we'll use it later
+                // 2. move to the scope of the setTimeout call
+                // 3. assert that there's only one `await axios` call
+                // 4. get the `await axios` call position in the body
+                // 5. create a piece of AST that
+                //    a. creates a websocket client for the scheme adapter test endpoint
+                //    b. creates a promise that resolves when a message is received to that client
+                // 6. insert the AST from (5) before the `await axios` call
+                // 7. replace `const response = pm.sendRequest` with `const response = await the promise from (5b)`
+                console.log("WIP");
+                // console.log(setTimeoutExprStmt);
+                // console.log(jsc(setTimeoutExprStmt.scope.path).toSource());
+                // Replace the request with a websockets request, put that just before the main
+                // request (which is the only call to axios) is made.
+            });
+    };
+
+
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
     //
@@ -1192,6 +1274,7 @@ const createOrReplaceOutputDir = async (name) => {
     removeAnnoyingLogging(j);
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
+    replaceTimeoutsWithWebSockets(j);
     replaceSetTimeout(j);
     assertNoSetTimeout(j);
     replaceTestResponse(j);
@@ -1274,14 +1357,6 @@ const createOrReplaceOutputDir = async (name) => {
     //     similarity score. This might help identify factoring that can occur. However, it might
     //     be super-obvious just by looking at the code.
     //
-    // 17. Convert all
-    //       pm.test("Description", () => pm.expect(value).assertion);
-    //     to the simpler:
-    //       pm.expect(
-    //          value,
-    //          'Description'
-    //       ).assertion;
-    //
     // 18. convert things like
     //       let data = `{ "some": "${templateLiteral}", "templated": "json" }`
     //     to data
@@ -1306,8 +1381,8 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // 22. Replace usage of pm.expect or chai expect with jest expect
     //
-    // 23. Print all `it()`, `describe()` descriptions to help identify duplication.
-    //     Print all request contents to help identify duplication.
+    // 23. Print all `it()`, `describe()` descriptions to help identify duplication. Note that just
+    //     running the tests with jest does this.
     //
     // 24. Do some analysis of whether certain (especially environment) variables are actually
     //     used.
@@ -1317,6 +1392,8 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // 26. Assert that the same number of `it` calls exist before and after the transformation.
     //     (Except where we're getting rid of them deliberately...? So don't bother?)
+    //
+    // 27. Print all request contents to help identify duplication.
     //
     // 28. Wherever setTimeoutPromise is used we can probably replace it now with sleep, followed
     //     by the setTimeoutPromise callback function. We could also analyse the _purpose_ of
@@ -1349,6 +1426,14 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // 37. Wrap axios for the "request" part of the test? This way we can add behaviour (i.e.
     //     logging) more easily.
+    //
+    // 38. Replace the crazy {{{{VAR}}{{NAME}}str}} thing postman does?! Or perhaps just try to
+    //     detect and update manually. Even add comments in the output? Might need to write/use a
+    //     basic parser to actually replace this... Or maybe not- maybe just recursively replace
+    //     the outer-most curly braces. E.g. {{{{VAR}}{{NAME}}NAME}} becomes
+    //     1. `{{VAR}}{{NAME}}str`
+    //     2. `${VAR}${NAME}str`
+    //     Is this actually what it does? Will have to investigate further.
 
 
     // Examples:
