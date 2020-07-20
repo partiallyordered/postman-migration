@@ -2,10 +2,11 @@
 
 This proposal outlines a vision for a new role for Postman in Mojaloop and Mowali. This document
 gives a background on Postman and its use in these projects. It presents shortcomings of Postman
-and discusses how the Mojaloop project and test suite have outgrown Postman, and how Postman acts
-as a barrier to community contribution. As a solution, it proposes an automatic migration path from
-Postman to the open-source Javascript test runner, _Jest_. This retains _all_ of the excellent work
-done on the existing test suites, and allows the suite to continue to grow with the project.
+and discusses how the Mojaloop project and test suite have outgrown Postman, how this will become
+increasingly problematic as the project grows, and how Postman acts as a barrier to community
+contribution. As a solution, it proposes an automatic migration path from Postman to the
+open-source Javascript test runner, _Jest_. This retains _all_ of the excellent work done on the
+existing test suites, and allows the suite to continue to grow with the project.
 
 Intended readers are
 * users of Postman within Mojaloop and associated projects
@@ -74,7 +75,8 @@ This section details the motivation for this proposal. It will discuss shortcomi
 None of these shortcomings exist in Jest.
 
 ### Summary
-- Mojaloop has outgrown Postman
+- Mojaloop has outgrown Postman. This will become increasingly problematic as the number of
+    contributors and the size of the test collections grow.
     - Collaboration on Postman tests will become impossible as the number of contributors grows.
         Test developers will need to make changes and race to merge them before that is rendered
         impossible by further development of the collection. This is because of the difficulty of
@@ -85,13 +87,13 @@ None of these shortcomings exist in Jest.
         difficulty of code reuse within Postman collections.
     - Test execution duration will grow unreasonably, especially as Postman provides no facility
         for concurrent test execution.
+    - The test suite will grow increasingly flaky as it increases in size. This is fundamentally
+        because of Postman's inability to handle the asynchronous nature of the FSPIOP API. Postman
+        requires timeouts and polling to work around this, resulting in unreliable tests. It is not
+        practical to use the wider Javascript ecosystem to improve the quality and consistency of
+        the tests due to the limitations of the Postman sandbox.
 - Quality assurance is fundamentally impossible due to difficulty reviewing Postman collection
     diffs. Quality assurance is the predominant usage of Postman in Mojaloop.
-- The test suite will grow increasingly flaky as it increases in size. This is fundamentally
-    because of Postman's inability to handle the asynchronous nature of the FSPIOP API. Postman
-    requires timeouts and polling to work around this, resulting in unreliable tests. It is not
-    practical to use the wider Javascript ecosystem to improve the quality and consistency of the
-    tests due to the limitations of the Postman sandbox.
 
 |                                | Jest | Postman |
 | ------------------------------ | ---- | ------- |
