@@ -1,12 +1,11 @@
 # A Proposal for Postman in Mojaloop
 
 This proposal outlines a vision for a new role for Postman in Mojaloop and Mowali. This document
-gives a background on Postman and its use in these projects. It discusses shortcomings with Postman
-and its use. It proposes that the Mojaloop project and test suite have outgrown Postman, and that
-Postman is a barrier to community contribution. As a solution, it proposes an automatic migration
-path from Postman to the open-source Javascript test runner, _Jest_. This retains _all_ of the
-excellent work done on the existing test suites, and allows the suite to continue to grow with the
-project.
+gives a background on Postman and its use in these projects. It presents shortcomings of Postman
+and discusses how the Mojaloop project and test suite have outgrown Postman, and how Postman acts
+as a barrier to community contribution. As a solution, it proposes an automatic migration path from
+Postman to the open-source Javascript test runner, _Jest_. This retains _all_ of the excellent work
+done on the existing test suites, and allows the suite to continue to grow with the project.
 
 Intended readers are
 * users of Postman within Mojaloop and associated projects
@@ -34,10 +33,10 @@ Postman calls itself _The Collaboration Platform for API Development_. Postman a
 generate a suite of API requests, tests and configuration. These can be shared between users of
 Postman cloud with ease, or via other mechanisms with a little more difficulty.
 
-#### What is Postman _good_ for?
+#### What is Postman _Good_ for?
 Postman provides a pleasant UI and a mechanism to encode an API client and share it.
 
-#### What is Postman used for in Mojaloop and Mowali?
+#### What is Postman Used for in Mojaloop and Mowali?
 Postman is used as
 1. A user interface to Mojaloop for developers, testers and operators to exercise FSPIOP and
    Mojaloop admin functionality.
@@ -68,7 +67,7 @@ Output is presented as follows:
 
 ![jest-results](./jest-example.png)
 
-Jest supports a range of output formats.
+Jest supports a range of standard test output formats.
 
 ## Motivation
 This section details the motivation for this proposal. It will discuss shortcomings of Postman.
@@ -87,7 +86,7 @@ None of these shortcomings exist in Jest.
     - Test execution duration will grow unreasonably, especially as Postman provides no facility
         for concurrent test execution.
 - Quality assurance is fundamentally impossible due to difficulty reviewing Postman collection
-    diffs. This is the largest usage of Postman in Mojaloop.
+    diffs. Quality assurance is the predominant usage of Postman in Mojaloop.
 - The test suite will grow increasingly flaky as it increases in size. This is fundamentally
     because of Postman's inability to handle the asynchronous nature of the FSPIOP API. Postman
     requires timeouts and polling to work around this, resulting in unreliable tests. It is not
@@ -117,26 +116,26 @@ Some examples:
 2. https://github.com/mojaloop/postman/pull/117/files
 3. https://github.com/mojaloop/postman/pull/135/files
 
-As a consequence, we resort to a screenshot of passing tests, which is a poor substitute for peer
-review. Example:  
+As a consequence, contributors resort to a screenshot of passing tests, which is a poor substitute
+for peer review. Example:  
 https://github.com/mojaloop/postman/pull/143
 
 In the author's opinion, this limitation renders Postman fundamentally inadequate for quality
 assurance.
 
 #### Collaboration
-Postman collection changes produce very large, unwieldly diffs (see [Peer review](#peer-review) for
+Postman collection changes produce very large, unwieldy diffs (see [Peer review](#peer-review) for
 examples). This makes maintenance of code changes very difficult. If one makes some changes, but
 other changes land in the main branch in the interim, it is exceedingly difficult to merge both
-sets of changes. This makes it impossible to maintain a fork for longer-lived differences- a
+sets of changes. This makes it impossible to maintain a fork for longer-lived differences - a
 frequent requirement during development.
 
 #### Code Reuse
 Postman makes code reuse very difficult. To share code between tests, one must store and retrieve
-these as Postman variables or environment. To use code from outside of Postman, one may set and
-retrieve said code (stringified in a JSON file) in Postman environment files, or retrieve this code
-using an HTTP request from Postman. In both cases, that code must then be executed in the Postman
-environment using `eval` (a security risk in certain contexts).
+these as Postman variables or from environment files. To use code from outside of Postman, one may
+set and retrieve said code (stringified in a JSON file) in Postman environment files, or retrieve
+this code using an HTTP request from Postman. In both cases, that code must then be executed in the
+Postman environment using `eval` (a security risk in certain contexts).
 
 Additionally, similar tests must be duplicates. If a user wishes to write five tests of similar API
 calls, with the same assertions, they must create five nearly-identical duplicates of the test. For
@@ -160,20 +159,20 @@ Because code reuse is so difficult, users resort to one of the following options
 Postman limits users to the functionality provided in [its sandbox](https://learning.postman.com/docs/writing-scripts/script-references/postman-sandbox-api-reference/).
 It is difficult at best to leverage the wider ecosystem of tools and libraries available to a
 normal development environment or programming language. Some examples:
-- Postman runs tests sequentially. It is possible to initiate multiple parallel sets of tests from
-    _outside_ Postman, using operating system functionality. This means that if one wishes to run
-    tests concurrently, collections must be structured to accommodate this limitation.
+- Postman runs tests sequentially. All popular Javascript test frameworks provide support for
+    concurrent tests.
 - In Mowali it was not feasible to write some tests using Postman, due to reliance on external
     libraries to set Kubernetes system state, access SFTP directories, or parse data formats not
     supported by Postman (XLSX).
-- In Mowali it was necessary to use a branch of newman in order to use more than one TLS
+- In Mowali it was necessary to use a branch of Newman in order to use more than one TLS
     certificate.
 - Postman does not support websockets and therefore cannot utilise, for example, [this PR](https://github.com/mojaloop/sdk-scheme-adapter/pull/185).
-    This is very useful functionality for an asynchronous API such as FSPIOP-API. Postman has had
-    [a PR open for this issue for more than 18 months](https://github.com/postmanlabs/postman-app-support/issues/4009).
-- Automatic conversion of Postman tests to Jest used _jscodeshift_, a tool for large-scale
-    automated analysis and transformation of Javascript code. This sort of analysis and
-    transformation is not accessible to tests written with Postman.
+    This is very useful functionality for an asynchronous API such as the FSPIOP API. Postman has
+    had [a PR open for this issue for more than 18 months](https://github.com/postmanlabs/postman-app-support/issues/4009).
+- The Postman collections were converted to naive javascript. _jscodeshift_, a tool for large-scale
+    automated analysis and transformation of Javascript code, was used to transform that naive
+    javascript into better javascript. This sort of analysis and transformation is not accessible
+    to tests written with Postman.
 - Postman supports a much more limited range of output formats and integrations than
     the wider Javascript ecosystem.
 - Postman development is limited to the Postman IDE. This contains a passable code editor and a
@@ -197,6 +196,7 @@ been very difficult to diagnose.
 Postman introduces a sandbox and "scripting" model with
 - [a confusing hierarchy of variable scopes](https://learning.postman.com/docs/sending-requests/variables/#variable-scopes)
 - [a confusing execution model with explicitly shared data](https://learning.postman.com/docs/writing-scripts/intro-to-scripts/#execution-order-of-scripts)
+
 This requires less common training and experience that requires investment in staff. It is a less
 desirable skill than Javascript and therefore staff are likely to buy in less.
 
@@ -210,16 +210,16 @@ perfect code, but it produces code that can be much more easily maintained, refa
 than Postman collections.
 
 ### Postman's Role
-This document proposes one use for Postman as a UI for the Mojaloop admin API, and the FSPIOP API.
-The Mojaloop project should scale back its usage of Postman to provide an example set of requests
-against these APIs to enable interactive testing and usage of Mojaloop and FSPIOP functionality.
+This document proposes one use for Postman: to be a UI for the Mojaloop admin API, and the FSPIOP API.
+The Mojaloop project should use Postman _only_ to provide an example set of requests against these
+APIs to enable interactive testing and usage of Mojaloop and FSPIOP functionality.
 
 ## Glossary
 
 | Word            | Definition                          |
 | --------------- | ----------------------------------- |
-| Postman         | See [What is Postman?](#what-is-postman). https://www.postman.com/ |
 | Collection      | A suite of tests written in Postman |
 | Environment     | A configuration file for Postman    |
 | Jest            | A Javascript test runner: https://jestjs.io/ |
 | Postman sandbox | A Postman test execution environment |
+| Postman         | See [What is Postman?](#what-is-postman)<br>https://www.postman.com/ |
