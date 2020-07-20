@@ -169,10 +169,10 @@ normal development environment or programming language. Some examples:
 - Postman does not support websockets and therefore cannot utilise, for example, [this PR](https://github.com/mojaloop/sdk-scheme-adapter/pull/185).
     This is very useful functionality for an asynchronous API such as the FSPIOP API. Postman has
     had [a PR open for this issue for more than 18 months](https://github.com/postmanlabs/postman-app-support/issues/4009).
-- The Postman collections were converted to naive javascript. _jscodeshift_, a tool for large-scale
-    automated analysis and transformation of Javascript code, was used to transform that naive
-    javascript into better javascript. This sort of analysis and transformation is not accessible
-    to tests written with Postman.
+- The Postman collections were naively converted to javascript. _jscodeshift_, a tool for
+    large-scale automated analysis and transformation of Javascript code, was used to transform
+    that naive javascript into better javascript. This sort of analysis and transformation is not
+    accessible to tests written with Postman.
 - Postman supports a much more limited range of output formats and integrations than
     the wider Javascript ecosystem.
 - Postman development is limited to the Postman IDE. This contains a passable code editor and a
