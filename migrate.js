@@ -1320,6 +1320,11 @@ const createOrReplaceOutputDir = async (name) => {
                 } catch (err) {
                     // TODO: notice that "`unmodified`" appears modified. That's because it is.
                     // This particular piece of code has two setTimeout calls.
+                    // We can resolve the resultant name clash by either
+                    // 1. storing the scopes we've already visited and perturbing our variable
+                    //    names when we re-encounter one or
+                    // 2. working from scopes downwards, replacing all setTimeout calls within each
+                    //    test
                     console.log(unmodified);
                     // console.log(jsc(setTimeoutExprStmt.scope.path).toSource());
                     throw (err);
