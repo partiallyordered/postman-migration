@@ -1208,7 +1208,9 @@ const createOrReplaceOutputDir = async (name) => {
             Array(blockStatementBody.value.length)
                 .fill()
                 .map((_, i) => blockStatementBody.get(`${i}`));
-        return j
+        // Get a map of scopes to setTimeout ExpressionStatements. From this map, we'll build
+        // transformations to insert in the scope.
+        const scopes = j
             .find(jsc.BlockStatement)
             // Get the setTimeout calls from within the block statements
             .map((path) =>
@@ -1239,97 +1241,110 @@ const createOrReplaceOutputDir = async (name) => {
                         .some((p) => /(callbacks|requests)/.test(p.value.value))
                     )
             )
-            // .at(0)
-            .forEach((setTimeoutExprStmt) => {
-                const unmodified = jsc(setTimeoutExprStmt.scope.path).toSource();
-                // 1. get the argument (url) to the pm.sendRequest call, we'll use it later
-                const pmSendRequest = getPmSendRequestExpressions(setTimeoutExprStmt).paths()[0];
-                const requestUrl = pmSendRequest.parentPath.value.arguments[0];
-                // 2. move to the scope of the setTimeout call
-                const setTimeoutScopeBlockStatementBody =
-                    setTimeoutExprStmt.scope.path.get('body').get('body');
-                const setTimeoutScopeBlockStatementBodyPaths =
-                    getBlockStatementBodyChildPaths(setTimeoutScopeBlockStatementBody);
-                // 3. get the `await axios` call position in the body
-                const requestStatements = setTimeoutScopeBlockStatementBodyPaths
-                    .filter(
-                        astNodesAreEquivalent(
-                            // Find something that looks like:
-                            //   const resp = await axios(config)
-                            jsc.variableDeclaration(
-                                'const',
-                                [
-                                    jsc.variableDeclarator(
-                                        jsc.identifier('resp'),
-                                        jsc.awaitExpression(
-                                            jsc.callExpression(
-                                                jsc.identifier('axios'),
-                                                [jsc.identifier('config')]
-                                            )
+            .paths()
+            .reduce((scopes, path) => {
+                const scope = scopes.get(path.scope);
+                scopes.set(
+                    path.scope,
+                    scope ? [...scope, path] : [path]
+                )
+                return scopes;
+            }, new Map())
+
+        const buildNewCode = (setTimeoutExprStmt, i) => {
+            // 1. get the argument (url) to the pm.sendRequest call, we'll use it later
+            const pmSendRequest = getPmSendRequestExpressions(setTimeoutExprStmt).paths()[0];
+            const requestUrl = pmSendRequest.parentPath.value.arguments[0];
+            // 5. create a piece of AST that
+            //      a. creates a websocket client for the scheme adapter test endpoint
+            //      b. creates a promise that resolves when a message is received to that client
+            //    e.g., where requestUrl is the URL argument to pm.sendRequest we found
+            //    previously, in step (1):
+            //      const wsUrl = requestUrl.replace(/^(http)?s?(:\/\/)?/, 'ws://');
+            //      const ws = new WebSocket(wsUrl);
+            //      const wsMessage = new Promise((resolve) => ws.on('message', resolve));
+            const mod = i === 0 ? '' : `${i}`;
+            const newWsCode = jsc([
+                `const wsUrl${mod} = (` + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
+                `const ws${mod} = new WebSocket(wsUrl${mod});`,
+                `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', resolve));\n`,
+            ].join('\n')).getAST()[0].value.program.body;
+            // 8. wait for the websocket to close:
+            //      await new Promise((resolve) => ws.close(resolve));
+            // We build the await outside the parser, because the await will fail to parse.
+            const waitWsCloseCode =
+                jsc.expressionStatement(
+                    jsc.awaitExpression(
+                        jsc(`new Promise((resolve) => ws${mod}.close(resolve));`)
+                        .getAST()[0].value.program.body[0].expression
+                    )
+                );
+
+            const newPmSendRequest = jsc.identifier(`wsMessage${mod}`);
+            return {
+                pmSendRequest,
+                newPmSendRequest,
+                newWsCode,
+                waitWsCloseCode,
+            };
+        };
+
+        for (let [scope, setTimeoutExprStmts] of scopes) {
+            // 2. move to the body of the scope of the setTimeout call
+            const testBody = scope.path.get('body').get('body');
+            const testBodyPaths = getBlockStatementBodyChildPaths(testBody);
+            // 3. get the `await axios` call position in the body
+            const requestStatements = testBodyPaths
+                .filter(
+                    astNodesAreEquivalent(
+                        // Find something that looks like:
+                        //   const resp = await axios(config)
+                        jsc.variableDeclaration(
+                            'const',
+                            [
+                                jsc.variableDeclarator(
+                                    jsc.identifier('resp'),
+                                    jsc.awaitExpression(
+                                        jsc.callExpression(
+                                            jsc.identifier('axios'),
+                                            [jsc.identifier('config')]
                                         )
                                     )
-                                ]
-                            )
+                                )
+                            ]
                         )
-                    );
-                // 4. assert that there's exactly one `const resp = await axios(config)` call- this
-                //    is the "request" of the test (i.e. not the pre-request script or the "test")
-                assert(
-                    requestStatements.length === 1,
-                    'Expect exactly one instance of `await axios` in the scope of the setTimeout call'
+                    )
                 );
-                const requestStatement = requestStatements[0];
-                // 5. create a piece of AST that
-                //      a. creates a websocket client for the scheme adapter test endpoint
-                //      b. creates a promise that resolves when a message is received to that client
-                //    e.g., where requestUrl is the URL argument to pm.sendRequest we found
-                //    previously, in step (1):
-                //      const wsUrl = requestUrl.replace(/^(http)?s?(:\/\/)?/, 'ws://');
-                //      const ws = new WebSocket(wsUrl);
-                //      const wsMessage = new Promise((resolve) => ws.on('message', resolve));
-                const newCode = jsc([
-                    'const wsUrl = (' + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
-                    'const ws = new WebSocket(wsUrl);',
-                    'const wsMessage = new Promise((resolve) => ws.on(\'message\', resolve));',
-                ].join('\n')).getAST()[0].value.program.body;
-                try {
-                // 6. insert the AST from (5) before the `await axios` call
-                requestStatement.insertBefore(...newCode);
-                // 7. replace
-                //      const response = await pm.sendRequest(blah);
-                //    with the promise from (5b)
-                //      const response = await wsMessage;
-                pmSendRequest.parentPath.replace(jsc.identifier('wsMessage'));
-                // 8. wait for the websocket to close:
-                //      await new Promise((resolve) => ws.close(resolve));
-                // We build the await outside the parser, because the await will fail to parse.
-                const waitWsClose =
-                    jsc.expressionStatement(
-                        jsc.awaitExpression(
-                            jsc('new Promise((resolve) => ws.close(resolve));')
-                                .getAST()[0].value.program.body[0].expression
-                        )
-                    );
-                setTimeoutScopeBlockStatementBody.push(waitWsClose);
-                // 9. Replace the setTimeout call with the function body of its callback.
+            // 4. assert that there's exactly one `const resp = await axios(config)` call- this
+            //    is the "request" of the test (i.e. not the pre-request script or the "test")
+            assert(
+                requestStatements.length === 1,
+                'Expect exactly one instance of `await axios` in the scope of the setTimeout call'
+            );
+            const requestStatement = requestStatements[0];
+
+            const newCode = setTimeoutExprStmts.map(buildNewCode);
+            const newWsCode = newCode.reduce((pv, cv) => ([...pv, ...cv.newWsCode]), []);
+            const waitWsCloseCode = newCode.map((el) => el.waitWsCloseCode);
+
+            // 6. insert the AST from (5) before the `await axios` call
+            requestStatement.insertBefore(...newWsCode);
+            // 7. replace
+            //      const response = await pm.sendRequest(blah);
+            //    with the promise from (5b)
+            //      const response = await wsMessage;
+            newCode.forEach(({ pmSendRequest, newPmSendRequest }) =>
+                pmSendRequest.parentPath.replace(newPmSendRequest)
+            );
+
+            testBody.push(...waitWsCloseCode);
+            // 9. Replace the setTimeout call with the function body of its callback.
+            setTimeoutExprStmts.forEach((setTimeoutExprStmt) =>
                 setTimeoutExprStmt.replace(
                     setTimeoutExprStmt.value.expression.arguments[0].body
-                );
-                console.log("WIP");
-
-                } catch (err) {
-                    // TODO: notice that "`unmodified`" appears modified. That's because it is.
-                    // This particular piece of code has two setTimeout calls.
-                    // We can resolve the resultant name clash by either
-                    // 1. storing the scopes we've already visited and perturbing our variable
-                    //    names when we re-encounter one or
-                    // 2. working from scopes downwards, replacing all setTimeout calls within each
-                    //    test
-                    console.log(unmodified);
-                    // console.log(jsc(setTimeoutExprStmt.scope.path).toSource());
-                    throw (err);
-                }
-            });
+                )
+            );
+        }
     };
 
 
