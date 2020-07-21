@@ -186,7 +186,7 @@ const nodeTypes = [
 // So we can do this:
 //   jsc(src).find(jsc.Identifier).filter(chk.VariableDeclaration)
 // Instead of:
-//   jsc(src).find(jsc.Identifier).filter((node) => jsc.VariableDeclaration.check(node))
+//   jsc(src).find(jsc.Identifier).filter((path) => jsc.VariableDeclaration.check(path))
 const chk = Object.assign({}, ...nodeTypes.map(key => ({ [key]: jsc[key].check.bind(jsc[key]) })));
 const asrt = Object.assign({}, ...nodeTypes.map(key => ({ [key]: jsc[key].assert.bind(jsc[key]) })));
 const not = (f) => (...args) => !f(...args);
@@ -216,7 +216,7 @@ const preamble = [
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
     'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
     'const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));',
-    'const ws = require(\'ws\');',
+    'const WebSocket = require(\'ws\');',
 ].join('\n');
 
 const createOrReplaceOutputDir = async (name) => {
@@ -684,6 +684,7 @@ const createOrReplaceOutputDir = async (name) => {
                 // to
                 //   it('blah', () => {
                 //     let locals = {};
+                //     // stuff
                 //   })
                 itCallExpression.get('arguments').get('1').get('body').get('body').get('0').insertBefore(
                     jsc.variableDeclaration(
@@ -1198,6 +1199,15 @@ const createOrReplaceOutputDir = async (name) => {
         const getPmSendRequestExpressions = (nodeOrPath) => jsc(nodeOrPath)
             .find(jsc.MemberExpression)
             .filter(astNodesAreEquivalent(buildNestedMemberExpression(['pm', 'sendRequest'])))
+        // The blockStatementBody parameter will come from e.g.
+        //   jsc(src).find(jsc.BlockStatement).map((path) => path.get('body'))
+        // or, as the ArrowFunctionExpression.body _is_ a BlockStatement, which itself _has_ a body
+        // property, which contains the array of things this function looks for:
+        //   jsc(src).find(jsc.ArrowFunctionExpression).map((path) => path.get('body').get('body'))
+        const getBlockStatementBodyChildPaths = (blockStatementBody) =>
+            Array(blockStatementBody.value.length)
+                .fill()
+                .map((_, i) => blockStatementBody.get(`${i}`));
         return j
             .find(jsc.BlockStatement)
             // Get the setTimeout calls from within the block statements
@@ -1229,23 +1239,88 @@ const createOrReplaceOutputDir = async (name) => {
                         .some((p) => /(callbacks|requests)/.test(p.value.value))
                     )
             )
-            .at(0)
+            // .at(0)
             .forEach((setTimeoutExprStmt) => {
-                // We're going to
-                // 1. get the argument to the pm.sendRequest call, we'll use it later
+                try {
+                // 1. get the argument (url) to the pm.sendRequest call, we'll use it later
+                const pmSendRequest = getPmSendRequestExpressions(setTimeoutExprStmt).paths()[0];
+                const requestUrl = pmSendRequest.parentPath.value.arguments[0];
                 // 2. move to the scope of the setTimeout call
-                // 3. assert that there's only one `await axios` call
-                // 4. get the `await axios` call position in the body
+                const setTimeoutScopeBlockStatementBody =
+                    setTimeoutExprStmt.scope.path.get('body').get('body');
+                const setTimeoutScopeBlockStatementBodyPaths =
+                    getBlockStatementBodyChildPaths(setTimeoutScopeBlockStatementBody);
+                // 3. get the `await axios` call position in the body
+                const requestStatements = setTimeoutScopeBlockStatementBodyPaths
+                    .filter(
+                        astNodesAreEquivalent(
+                            // Find something that looks like:
+                            //   const resp = await axios(config)
+                            jsc.variableDeclaration(
+                                'const',
+                                [
+                                    jsc.variableDeclarator(
+                                        jsc.identifier('resp'),
+                                        jsc.awaitExpression(
+                                            jsc.callExpression(
+                                                jsc.identifier('axios'),
+                                                [jsc.identifier('config')]
+                                            )
+                                        )
+                                    )
+                                ]
+                            )
+                        )
+                    );
+                // 4. assert that there's exactly one `const resp = await axios(config)` call- this
+                //    is the "request" of the test (i.e. not the pre-request script or the "test")
+                assert(
+                    requestStatements.length === 1,
+                    'Expect exactly one instance of `await axios` in the scope of the setTimeout call'
+                );
+                const requestStatement = requestStatements[0];
                 // 5. create a piece of AST that
-                //    a. creates a websocket client for the scheme adapter test endpoint
-                //    b. creates a promise that resolves when a message is received to that client
+                //      a. creates a websocket client for the scheme adapter test endpoint
+                //      b. creates a promise that resolves when a message is received to that client
+                //    e.g., where requestUrl is the URL argument to pm.sendRequest we found
+                //    previously, in step (1):
+                //      const wsUrl = requestUrl.replace(/^(http)?s?(:\/\/)?/, 'ws://');
+                //      const ws = new WebSocket(wsUrl);
+                //      const wsMessage = new Promise((resolve) => ws.on('message', resolve));
+                const newCode = jsc([
+                    'const wsUrl = (' + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
+                    'const ws = new WebSocket(wsUrl);',
+                    'const wsMessage = new Promise((resolve) => ws.on(\'message\', resolve));',
+                ].join('\n')).getAST()[0].value.program.body;
                 // 6. insert the AST from (5) before the `await axios` call
-                // 7. replace `const response = pm.sendRequest` with `const response = await the promise from (5b)`
+                requestStatement.insertBefore(...newCode);
+                // 7. replace
+                //      const response = await pm.sendRequest(blah);
+                //    with the promise from (5b)
+                //      const response = await wsMessage;
+                pmSendRequest.parentPath.replace(jsc.identifier('wsMessage'));
+                // 8. wait for the websocket to close:
+                //      await new Promise((resolve) => ws.close(resolve));
+                // We build the await outside the parser, because the await will fail to parse.
+                const waitWsClose =
+                    jsc.expressionStatement(
+                        jsc.awaitExpression(
+                            jsc('new Promise((resolve) => ws.close(resolve));')
+                                .getAST()[0].value.program.body[0].expression
+                        )
+                    );
+                setTimeoutScopeBlockStatementBody.push(waitWsClose);
+                // 9. Replace the setTimeout call with the function body of its callback.
+                setTimeoutExprStmt.replace(
+                    setTimeoutExprStmt.value.expression.arguments[0].body
+                );
                 console.log("WIP");
-                // console.log(setTimeoutExprStmt);
-                // console.log(jsc(setTimeoutExprStmt.scope.path).toSource());
-                // Replace the request with a websockets request, put that just before the main
-                // request (which is the only call to axios) is made.
+
+                } catch (err) {
+                    console.log('TESTICLES THE GREEK HERO');
+                    console.log(jsc(setTimeoutExprStmt).toSource());
+                    throw (err);
+                }
             });
     };
 
@@ -1275,21 +1350,21 @@ const createOrReplaceOutputDir = async (name) => {
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
     replaceTimeoutsWithWebSockets(j);
-    replaceSetTimeout(j);
-    assertNoSetTimeout(j);
-    replaceTestResponse(j);
-    replacePmResponseJson(j);
-    replacePmResponseCode(j);
-    assertPmResponseIsReplaced(j);
-    replaceVariableUsage(j);
-    notifyUnreplacedVariables(j);
-    assertPmVariablesCallsGone(j);
-    transformForEachToAwaitPromiseAll(j);
-    removeResponseResponseSize(j);
-    removeJsRsaSignEvalAndRelatedRubbish(j);
-    assertNoEval(j);
-    replaceVarWithLet(j);
-    replacePmTest(j);
+    // replaceSetTimeout(j);
+    // assertNoSetTimeout(j);
+    // replaceTestResponse(j);
+    // replacePmResponseJson(j);
+    // replacePmResponseCode(j);
+    // assertPmResponseIsReplaced(j);
+    // replaceVariableUsage(j);
+    // notifyUnreplacedVariables(j);
+    // assertPmVariablesCallsGone(j);
+    // transformForEachToAwaitPromiseAll(j);
+    // removeResponseResponseSize(j);
+    // removeJsRsaSignEvalAndRelatedRubbish(j);
+    // assertNoEval(j);
+    // replaceVarWithLet(j);
+    // replacePmTest(j);
 
     await fs.writeFile(testFileName, `${preamble}${j.toSource({ tabWidth: 4 })}`);
 
@@ -1434,6 +1509,19 @@ const createOrReplaceOutputDir = async (name) => {
     //     1. `{{VAR}}{{NAME}}str`
     //     2. `${VAR}${NAME}str`
     //     Is this actually what it does? Will have to investigate further.
+    //
+    // 39. Replace all BlockStatements with a single BlockStatement child with just a top-level
+    //     BlockStatement. E.g. replace this:
+    //       {
+    //         {
+    //           stuff
+    //         }
+    //       }
+    //     with:
+    //       {
+    //         stuff
+    //       }
+    //     Note: they may be nested. Why wouldn't they be..?
 
 
     // Examples:
@@ -1460,4 +1548,10 @@ const createOrReplaceOutputDir = async (name) => {
     // BlockStatement. This is normally an ExpressionStatement with a `.name` that corresponds to
     // its position in the BlockStatement (an array index, of type string).
     //   path.parentPath.insertBefore(...callbackBody.value);
+    //
+    // Create some new code without having to build the structure, i.e. have jsc do it for us:
+    //   jsc('const a = 5').getAST()[0].value
+    // Now we can insert that in our existing AST. Sometimes it might be necessary to inspect what
+    // comes out of .getAST() and traverse the tree to get what you want. Check this file for
+    // examples.
 })();
