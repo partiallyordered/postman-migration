@@ -1241,7 +1241,7 @@ const createOrReplaceOutputDir = async (name) => {
             )
             // .at(0)
             .forEach((setTimeoutExprStmt) => {
-                try {
+                const unmodified = jsc(setTimeoutExprStmt.scope.path).toSource();
                 // 1. get the argument (url) to the pm.sendRequest call, we'll use it later
                 const pmSendRequest = getPmSendRequestExpressions(setTimeoutExprStmt).paths()[0];
                 const requestUrl = pmSendRequest.parentPath.value.arguments[0];
@@ -1292,6 +1292,7 @@ const createOrReplaceOutputDir = async (name) => {
                     'const ws = new WebSocket(wsUrl);',
                     'const wsMessage = new Promise((resolve) => ws.on(\'message\', resolve));',
                 ].join('\n')).getAST()[0].value.program.body;
+                try {
                 // 6. insert the AST from (5) before the `await axios` call
                 requestStatement.insertBefore(...newCode);
                 // 7. replace
@@ -1317,8 +1318,10 @@ const createOrReplaceOutputDir = async (name) => {
                 console.log("WIP");
 
                 } catch (err) {
-                    console.log('TESTICLES THE GREEK HERO');
-                    console.log(jsc(setTimeoutExprStmt).toSource());
+                    // TODO: notice that "`unmodified`" appears modified. That's because it is.
+                    // This particular piece of code has two setTimeout calls.
+                    console.log(unmodified);
+                    // console.log(jsc(setTimeoutExprStmt.scope.path).toSource());
                     throw (err);
                 }
             });
