@@ -6,7 +6,8 @@ and discusses how the Mojaloop project and test suite have outgrown Postman, how
 increasingly problematic as the project grows, and how Postman acts as a barrier to community
 contribution. As a solution, it proposes an automatic migration path from Postman to the
 open-source Javascript test runner, _Jest_. This retains _all_ of the excellent work done on the
-existing test suites, and allows the suite to continue to grow with the project.
+existing test suites, and allows the suite to continue to grow with the project. Experimentation
+with the Mowali test suite has shown 40% shorter test suite run time and increased reliability.
 
 Intended readers are
 * users of Postman within Mojaloop and associated projects
