@@ -132,7 +132,9 @@ Postman collection changes produce very large, unwieldy diffs (see [Peer review]
 examples). This makes maintenance of code changes very difficult. If one makes some changes, but
 other changes land in the main branch in the interim, it is exceedingly difficult to merge both
 sets of changes. This makes it impossible to maintain a fork for longer-lived differences - a
-frequent requirement during development.
+frequent requirement during development. Mowali recently experienced an expensive multi-week
+Postman collection integration exercise due to the difficulty of maintaining a longer-lived fork
+and reviewing the changes between upstream and the fork.
 
 #### Code Reuse
 Postman makes code reuse very difficult. To share code between tests, one must store and retrieve
