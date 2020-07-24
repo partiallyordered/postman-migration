@@ -41,10 +41,10 @@ Postman provides a pleasant UI and a mechanism to encode an API client and share
 
 #### What is Postman Used for in Mojaloop and Mowali?
 Postman is used as
-1. A user interface to Mojaloop for developers, testers and operators to exercise FSPIOP and
-   Mojaloop admin functionality.
-2. A suite of tests for developers and testers to run against Mojaloop interactively.
-3. A suite of tests to run in CI environments.
+- A user interface to Mojaloop for developers, testers and operators to exercise FSPIOP and
+    Mojaloop admin functionality.
+- A suite of tests for developers and testers to run against Mojaloop interactively.
+- A suite of tests to run in CI environments.
 
 ### Jest
 
