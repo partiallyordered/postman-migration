@@ -189,8 +189,6 @@ Documentation for the collection schema:
 Take a migration all the way through to Majestic
 
 ### Shortcomings of Postman:
-1.  Is there any serious organisation that uses postman for automated testing? No, that's because of
-    the following.
 2.  Impossible to diff, version control, peer review, maintain a fork. Example:
     https://github.com/casablanca-project/test-scripts/pull/167/files
 3.  Global state shared between tests
@@ -233,7 +231,7 @@ Take a migration all the way through to Majestic
     execution time of our test suite needs work, we are limited to what Postman provides, which,
     compared with the broader ecosystem, is a severe limitation indeed.
 9.  This refactor effort indicates postman is not appropriate. Why is setTimeout always called with
-    the literal argument `2000` instead of a variable? Because everyone feels that
+    the literal argument `2000` instead of a variable? Hypothesis: because everyone feels that
     `pm.environment.get` (mutable global state) is bad and overkill. JS test runners have a
     _parameter_ for test timeout and "afterall", "aftereach". JS request libraries can be configured
     per-instance or globally.
@@ -247,16 +245,15 @@ Take a migration all the way through to Majestic
     postman, it is not transferable, as standard js test runner and assertion library experience is.
 11. Enforces usage of a specific tool
 12. Output control, and run control in general is more limited
-13. Image- what other serious open source project uses postman for testing?
-14. Fails silently when variables, configuration, data are missing. E.g.
+13. Fails silently when variables, configuration, data are missing. E.g.
     `pm.request({{MISSING_VARIABLE}})` does not produce an error indicating the variable is not
     present, it simply proceeds.
-15. Postman is tedious to use. Want the latest tests?
+14. Postman is tedious to use. Want the latest tests?
     1. Remove your current environment and test suite
     2. Update them from their respective sources
     3. Re-import them
     4. Try to remember where you left off
-16. Postman is tedious to use. Where is a variable set?
+15. Postman is tedious to use. Where is a variable set?
     1. Try the environment variables
     2. Try to see if it's reset somewhere else
     3. Just go hunting around because there's no modern search mechanism _like a plain-text search,
@@ -273,11 +270,11 @@ Take a migration all the way through to Majestic
     9. See a PR to the `test-scripts` repo and realise it's all real.
     10. Despair. Ennui. Horror. Terror. Disgust.
     11. Fin.
-17. Variables and test data cannot be organised sensibly. The interface for this information is a
+16. Variables and test data cannot be organised sensibly. The interface for this information is a
     disaster. Variables cannot be sorted, and the UI is tragically, painfully slow.
 
 ### Good features of Postman:
-0. Good interactive API exploration tool
-1. Pleasant UI for running subsets of tests etc
-2. Some good aspects of test report output
-3. Easier to run a subset of tests
+1. Good interactive API exploration tool
+2. Pleasant UI for running subsets of tests etc
+3. Some good aspects of test report output
+4. Easier to run a subset of tests
