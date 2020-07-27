@@ -62,6 +62,7 @@ const fs = require('fs').promises;
 const jsc = require('jscodeshift');
 const { transformCollection, convertRequest } = require('./transformCollection');
 const assert = require('assert').strict;
+
 // Whitelist these environment variables. Add to this array are variables that are set dynamically,
 // for example:
 //     pm.environment.set(someVariableContainingAValue, someData);
@@ -216,7 +217,7 @@ const preamble = [
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
     'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
     'const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));',
-    'const WebSocket = require(\'ws\');',
+    'const SimWebSocket = require(\'./ws\');',
 ].join('\n');
 
 const createOrReplaceOutputDir = async (name) => {
@@ -1251,7 +1252,7 @@ const createOrReplaceOutputDir = async (name) => {
                 return scopes;
             }, new Map())
 
-        const buildNewCode = (setTimeoutExprStmt, i) => {
+        const buildNewCode = (requestStatement) => (setTimeoutExprStmt, i) => {
             // 1. get the argument (url) to the pm.sendRequest call, we'll use it later
             const pmSendRequest = getPmSendRequestExpressions(setTimeoutExprStmt).paths()[0];
             const requestUrl = pmSendRequest.parentPath.value.arguments[0];
@@ -1263,28 +1264,100 @@ const createOrReplaceOutputDir = async (name) => {
             //      const wsUrl = requestUrl.replace(/^(http)?s?(:\/\/)?/, 'ws://');
             //      const ws = new WebSocket(wsUrl);
             //      const wsMessage = new Promise((resolve) => ws.on('message', resolve));
+            // TODO: check whether the identifiers in the requestUrl will be available where we put
+            // the websocket request. If not, use the SimWebSocket. Use requestStatement.
+            //
+            // - get the identifiers from the request URL
+            const requestIdentifierNames = jsc(requestUrl)
+                .find(jsc.Identifier)
+                // If the identifier is a property on another object, we're not interested. It
+                // will not be declared independently.
+                .filter((p) => p.name !== 'property')
+                .paths()
+                .map((p) => p.value.name);
+            // - get the variable declarator for any identifiers
+            // - check if it is declared _after_ the request statement (because it could be
+            //   declared outside the scope of the current block- but we can be confident that if
+            //   it is declared after the request, it is not going to be available (notwithstanding
+            //   `var` usage- which should be eliminated before calling this function))
+            const pathsAfterRequest =
+                requestStatement.scope.path.get('body').get('body').filter(p => p.name >= requestStatement.name)
+            const declarationsAfterRequest = jsc(pathsAfterRequest)
+                .find(jsc.VariableDeclarator)
+                .filter((path) => requestIdentifierNames.includes(path.value.id.name))
+                .paths();
+
             const mod = i === 0 ? '' : `${i}`;
-            const newWsCode = jsc([
-                `const wsUrl${mod} = (` + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
-                `const ws${mod} = new WebSocket(wsUrl${mod});`,
-                `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', resolve));\n`,
-            ].join('\n')).getAST()[0].value.program.body;
+
+            // Truncate the request URL after /callbacks or /requests
+            const truncateId = (str) => str.replace(
+                /(?<path>(callbacks|requests)).*/, // capture /callbacks or /requests as a named group 'path'
+                (...params) => params.pop().path + '"'
+            );
+            const newWsCode = jsc(
+                (declarationsAfterRequest.length > 0
+                    ? [
+                        `const wsUrl${mod} = (` + truncateId(jsc(requestUrl).toSource()) + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
+                        `const ws${mod} = new SimWebSocket(wsUrl${mod});`,
+                    ]
+                    : [
+                        `const wsUrl${mod} = (` + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
+                        `const ws${mod} = new SimWebSocket(wsUrl${mod});`,
+                        // `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', (msg) => resolve(JSON.parse(msg))));\n`,
+                        `const wsMessage${mod} = ws.getNext();\n`,
+                    ]
+                ).join('\n')
+            ).getAST()[0].value.program.body;
+
+            // Have you tracked an error to here? Sometimes using insertAfter or insertBefore on
+            // the same position multiple times causes an error for some reason. For example, if we
+            // insert some code before a given line, then try again later to insert code before
+            // that line, an error will occur. Why? I don't know.
+            // TODO: try to make a minimal working example of the above-described behaviour in an
+            //       effort to understand it better.
+            let waitOnId = null;
+            if (declarationsAfterRequest.length !== 0) {
+                // requestUrl should look _like_:
+                //   pm.environment.get('SIM_SDK_INBOUND_ENDPOINT')+"/callbacks/"+transferId)
+                // we're interested in extracting `transferId` or whatever the thing after the
+                // "/callbacks/" bit is.
+                const lastDeclaration = declarationsAfterRequest.reduce((a ,b) => a.name > b.name ? a : b);
+                const id = lastDeclaration.value.id.name;
+                waitOnId = {
+                    after: lastDeclaration.parentPath.parentPath, // should be the VariableDeclaration rather than the VariableDeclarator
+                    code: jsc(`const wsMessage${mod} = ws.getAnyById(${id});`).getAST()[0].value.program.body[0],
+                };
+            }
+
+            // const newWsCode = jsc([
+            //     `const wsUrl${mod} = (` + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
+            //     `const ws${mod} = new WebSocket(wsUrl${mod});`,
+            //     // `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', resolve));\n`,
+            //     `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', (msg) => resolve(JSON.parse(msg))));\n`,
+            // ].join('\n')).getAST()[0].value.program.body;
             // 8. wait for the websocket to close:
             //      await new Promise((resolve) => ws.close(resolve));
             // We build the await outside the parser, because the await will fail to parse.
             const waitWsCloseCode =
                 jsc.expressionStatement(
                     jsc.awaitExpression(
-                        jsc(`new Promise((resolve) => ws${mod}.close(resolve));`)
-                        .getAST()[0].value.program.body[0].expression
+                        jsc.callExpression(
+                            jsc.memberExpression(
+                                jsc.identifier(`ws${mod}`),
+                                jsc.identifier('close')
+                            ),
+                            []
+                        )
                     )
                 );
 
             const newPmSendRequest = jsc.identifier(`wsMessage${mod}`);
             return {
+                setTimeoutExprStmt,
                 pmSendRequest,
                 newPmSendRequest,
                 newWsCode,
+                waitOnId,
                 waitWsCloseCode,
             };
         };
@@ -1323,7 +1396,7 @@ const createOrReplaceOutputDir = async (name) => {
             );
             const requestStatement = requestStatements[0];
 
-            const newCode = setTimeoutExprStmts.map(buildNewCode);
+            const newCode = setTimeoutExprStmts.map(buildNewCode(requestStatement));
             const newWsCode = newCode.reduce((pv, cv) => ([...pv, ...cv.newWsCode]), []);
             const waitWsCloseCode = newCode.map((el) => el.waitWsCloseCode);
 
@@ -1337,13 +1410,32 @@ const createOrReplaceOutputDir = async (name) => {
                 pmSendRequest.parentPath.replace(newPmSendRequest)
             );
 
+            // Insert the await for 
+            newCode.filter(({ waitOnId }) => waitOnId).forEach(({ waitOnId }) => {
+                waitOnId.after.insertAfter(waitOnId.code);
+            });
+
             testBody.push(...waitWsCloseCode);
-            // 9. Replace the setTimeout call with the function body of its callback.
-            setTimeoutExprStmts.forEach((setTimeoutExprStmt) =>
+            newCode.forEach(({ setTimeoutExprStmt, pmSendRequest }) => {
+                // 10. Get the variable name the response is assigned to
+                const responseVarName = pmSendRequest.parentPath.parentPath.parentPath.value.id;
+                // 11. Replace every instance of responseVarName.json() with responseVarName
+                jsc(setTimeoutExprStmt.get('expression').get('arguments').get('0').get('body'))
+                    .find(jsc.CallExpression)
+                    .filter(
+                        astNodesAreEquivalent(
+                            jsc.callExpression(
+                                buildNestedMemberExpression(['response', 'json']),
+                                []
+                            )
+                        )
+                    )
+                    .forEach(path => path.replace(jsc.identifier('response')));
+                // 12. Replace the setTimeout call with the function body of its callback.
                 setTimeoutExprStmt.replace(
                     setTimeoutExprStmt.value.expression.arguments[0].body
                 )
-            );
+            });
         }
     };
 
@@ -1372,22 +1464,24 @@ const createOrReplaceOutputDir = async (name) => {
     removeAnnoyingLogging(j);
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
+    removeJsRsaSignEvalAndRelatedRubbish(j);
+    replaceVarWithLet(j);
+    // replaceTimeoutsWithWebSockets can probably just be commented out to get a working test suite
+    // that doesn't rely on websockets.
     replaceTimeoutsWithWebSockets(j);
-    // replaceSetTimeout(j);
-    // assertNoSetTimeout(j);
-    // replaceTestResponse(j);
-    // replacePmResponseJson(j);
-    // replacePmResponseCode(j);
-    // assertPmResponseIsReplaced(j);
-    // replaceVariableUsage(j);
-    // notifyUnreplacedVariables(j);
-    // assertPmVariablesCallsGone(j);
-    // transformForEachToAwaitPromiseAll(j);
-    // removeResponseResponseSize(j);
-    // removeJsRsaSignEvalAndRelatedRubbish(j);
-    // assertNoEval(j);
-    // replaceVarWithLet(j);
-    // replacePmTest(j);
+    replaceSetTimeout(j);
+    assertNoSetTimeout(j);
+    replaceTestResponse(j);
+    replacePmResponseJson(j);
+    replacePmResponseCode(j);
+    assertPmResponseIsReplaced(j);
+    replaceVariableUsage(j);
+    notifyUnreplacedVariables(j);
+    assertPmVariablesCallsGone(j);
+    transformForEachToAwaitPromiseAll(j);
+    removeResponseResponseSize(j);
+    assertNoEval(j);
+    replacePmTest(j);
 
     await fs.writeFile(testFileName, `${preamble}${j.toSource({ tabWidth: 4 })}`);
 
