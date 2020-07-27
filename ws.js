@@ -12,12 +12,12 @@ module.exports = class SimWebSocket {
         return this.messages.filter((msg) => msg.id === id);
     }
 
-    async getAnyById(id) {
+    async getLatestByIdOrWait(id) {
         const received = this.getByIdSync(id);
         if (received.length > 0) {
-            return received;
+            return received[received.length - 1];
         }
-        return [getNext(data => data.id === id)];
+        return this.getNext(data => data.id === id);
     }
 
     async getNext(filter = () => true) {

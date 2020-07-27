@@ -1304,7 +1304,7 @@ const createOrReplaceOutputDir = async (name) => {
                         `const wsUrl${mod} = (` + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
                         `const ws${mod} = new SimWebSocket(wsUrl${mod});`,
                         // `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', (msg) => resolve(JSON.parse(msg))));\n`,
-                        `const wsMessage${mod} = ws.getNext();\n`,
+                        `const wsMessage${mod} = ws${mod}.getNext();\n`,
                     ]
                 ).join('\n')
             ).getAST()[0].value.program.body;
@@ -1325,7 +1325,7 @@ const createOrReplaceOutputDir = async (name) => {
                 const id = lastDeclaration.value.id.name;
                 waitOnId = {
                     after: lastDeclaration.parentPath.parentPath, // should be the VariableDeclaration rather than the VariableDeclarator
-                    code: jsc(`const wsMessage${mod} = ws.getAnyById(${id});`).getAST()[0].value.program.body[0],
+                    code: jsc(`const wsMessage${mod} = ws.getLatestByIdOrWait(${id});`).getAST()[0].value.program.body[0],
                 };
             }
 
