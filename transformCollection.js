@@ -15,39 +15,64 @@ const convertRequest = async (req) => {
     return promisify(requestCodeGen.convert)(pmRequest, opts);
 };
 
+// Utilities
+const EV_TYPE = {
+    prerequest: 'prerequest',
+    test: 'test',
+};
+const getEventScriptByType = (item, evType) => {
+    if (!item.event) {
+        return '';
+    }
+    const ev = item.event.find(ev => ev.listen === evType);
+    if (!ev) {
+        return '';
+    }
+    return ev.script.exec.join('\n');
+}
+
 // Take the pre-request code, the request, and the post-request scripts (generally tests and
 // assertions, but sometimes environment setting etc.)
 const transformRequestToTest = async (item) => {
-    // Utilities
-    const getEventScriptByType = (evType) => {
-        if (!item.event) {
-            return '';
-        }
-        const ev = item.event.find(ev => ev.listen === evType);
-        if (!ev) {
-            return '';
-        }
-        return ev.script.exec.join('\n');
-    }
-
     // "pre-request scripts"
-    const preRequest = getEventScriptByType('prerequest');
+    const preRequest = getEventScriptByType(item, EV_TYPE.prerequest);
 
     // request
     const req = await convertRequest(item.request);
 
     // "tests"
-    const test = getEventScriptByType('test');
+    const test = getEventScriptByType(item, EV_TYPE.test);
 
-    return `it('${item.name}', async () => {\n${preRequest}\n${req}\n${test}\n});`;
+    // filter empty items and join with line breaks
+    const code = [preRequest, req, test].filter((el) => el !== '').join('\n');
+
+    return `it('${item.name}', async () => {\n${code}\n});`;
 };
 
 const transformFolderToDescribe = async (item) => {
     const indent = '  ';
-    return `
-describe('${item.name}', () => {
-${indent}${(await Promise.all(item.item.map(transformItem))).join(`\n${indent}`)}
-});`;
+    const beforeAll = getEventScriptByType(item, EV_TYPE.prerequest);
+    const tests = (await Promise.all(item.item.map(transformItem))).join(`\n${indent}`)
+    const afterAll = getEventScriptByType(item, EV_TYPE.test);
+    return [
+        `describe('${item.name}', () => {`,
+        beforeAll === ''
+            ? [
+                `${indent}beforeAll(async () => {`,
+                `${indent}${indent}${beforeAll}`,
+                `${indent}})`,
+            ].join('\n')
+            : null,
+        `${indent}${tests}`,
+        afterAll === ''
+            ? [
+                `${indent}afterAll(async () => {`,
+                `${indent}${indent}${afterAll}`,
+                `${indent}})`,
+            ].join('\n')
+            : null,
+        `});`,
+    ].filter(el => el !== null).join('\n');
 };
 
 const transformItem = async (item) => {
@@ -65,21 +90,10 @@ const transformItem = async (item) => {
         return await transformRequestToTest(item);
     }
     else if (!item.request && item.item) {
-        if (item.event && item.event.some(ev => ev.script.exec.find(line => line !== ''))) {
-            // TODO: handle folders with pre-request or test scripts.
-            // At the time of writing this comment, it's likely the collection tree will be
-            // representated as a tree of _Folder_/_Request_. When transforming this tree to tests,
-            // it's likely a _Folder_ will transform to a `describe` block, and a _Request_ will
-            // transform to a `it` block.
-            // Therefore, handling the situation where a _Folder_ contains before/after scripts
-            // will amount to producing that code as `.beforeEach` and `.afterEach` functions.
-            throw new Error('Unhandled folder type with pre-request or test script');
-        }
         return await transformFolderToDescribe(item);
     }
 };
 
 module.exports = {
     transformCollection: transformItem,
-    convertRequest,
 };

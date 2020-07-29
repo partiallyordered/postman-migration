@@ -51,16 +51,20 @@
 // - Add messages to every assert in this file
 // - Automatic eslint pass afterward. Let user supply eslint config? (At least don't have it set
 //   globally by this module?)
+// - Formatting:
+//   - remove multiple sequential line breaks
+//   - remove trailing spaces
 
 // Notes:
 // - Jest execution order:
 //   https://jestjs.io/docs/en/setup-teardown#order-of-execution-of-describe-and-test-blocks
 
-const collection = require('../Golden_Path_Mowali.postman_collection.json');
+// const collection = require('../Golden_Path_Mowali.postman_collection.json');
+const collection = require('./Golden_Path_Mojaloop.postman_collection.orig.json');
 const util = require('util');
 const fs = require('fs').promises;
 const jsc = require('jscodeshift');
-const { transformCollection, convertRequest } = require('./transformCollection');
+const { transformCollection } = require('./transformCollection');
 const assert = require('assert').strict;
 
 // Whitelist these environment variables. Add to this array are variables that are set dynamically,
@@ -244,7 +248,7 @@ const createOrReplaceOutputDir = async (name) => {
     const j = jsc(src);
     const testCmd = require('./package.json').scripts.test.split(' ');
     const testFileName = testCmd[testCmd.length - 1];
-    fs.writeFile(`${testFileName.replace(/\.js$/, '-precodemod.js')}`, `${preamble}${src}`);
+    fs.writeFile(`${testFileName.replace(/\.js$/, '-precodemod.js')}`, `${preamble}\n${src}`);
 
     // Check node equivalence. Useful for determining whether two variables have the same definition.
     // Next: write something to determine the lowest shared scope. Seems `path` types have a `.scope`
@@ -1047,6 +1051,8 @@ const createOrReplaceOutputDir = async (name) => {
     //   eval(pm.environment.get('jrsassign'))
     // The variable declarations mean there isn't an error when the library is eval'ed.
     // Get rid of the horrible lot.
+    //
+    // We'll also remove the "request" the pulls this into the environment
     const removeJsRsaSignEvalAndRelatedRubbish = (j) => {
         j.find(jsc.CallExpression)
             .filter((path) => astNodesAreEquivalent(
@@ -1061,6 +1067,26 @@ const createOrReplaceOutputDir = async (name) => {
                     ]
                 )
             ))
+            .remove();
+        // Remove the entire "request" containing pm.environment.set('jrsassign',
+        // pm.response.text()). What this is doing is pulling this from a remote repository and
+        // dumping it into the postman environment. We replace this behaviour with
+        // require('jsrsasign');
+        j.find(jsc.CallExpression)
+            .filter((path) => astNodesAreEquivalent(
+                path.value,
+                jsc.callExpression(
+                    buildNestedMemberExpression(['pm', 'environment', 'set']),
+                    [
+                        jsc.literal('jrsassign'),
+                        jsc.callExpression(
+                            buildNestedMemberExpression(['pm', 'response', 'text']),
+                            []
+                        )
+                    ]
+                )
+            ))
+            .map((path) => path.scope.path.parentPath.parentPath.parentPath)
             .remove();
         // get rid of any 'var navigator' or 'var window' variabledeclarations
         const varEqualsEmptyObjDeclaration = (varName) =>
@@ -1483,7 +1509,7 @@ const createOrReplaceOutputDir = async (name) => {
     assertNoEval(j);
     replacePmTest(j);
 
-    await fs.writeFile(testFileName, `${preamble}${j.toSource({ tabWidth: 4 })}`);
+    await fs.writeFile(testFileName, `${preamble}\n${j.toSource({ tabWidth: 4 })}`);
 
 
     // TODO: transformations:
