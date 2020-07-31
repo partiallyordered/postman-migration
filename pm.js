@@ -4,17 +4,34 @@ const expect = require('chai').expect;
 
 const globalDataLol = {};
 
+// TODO: this doesn't _quite_ cut it: Postman can do some weird stuff like:
+//   {{string{{ENV}}{{VAR}}}}
+// which I _think_ is basically string interpolation and results in an analog of
+//   `string${env}${var}`
+// although this should be tested, because that doesn't seem obvious
+const postmanVarRegex = /{{[^}]+}}/g;
+const containsPostmanVars = (str) => postmanVarRegex.test(str);
+
+const getPostmanEnvironment = (keyStr) => {
+    if (keyStr in globalDataLol) {
+        const result = globalDataLol[keyStr];
+        if (!containsPostmanVars(result)) {
+            return result;
+        }
+        const handleMatch = (...params) => {
+            return getPostmanEnvironment(params[0].replace(/{{(?<varName>[^}]+)}}/, '$<varName>'));
+        }
+        return result.replace(postmanVarRegex, handleMatch)
+    }
+    throw new Error(`Variable ${keyStr} not present in environment`);
+};
+
 const createPmSandbox = (reportsSpec) => {
     const result = {
         // https://learning.postman.com/docs/postman/scripts/postman-sandbox-api-reference/#pmenvironment
         environment: {
             // pm.environment.get(variableName:String):function → *
-            get: (keyStr) => {
-                if (keyStr in globalDataLol) {
-                    return globalDataLol[keyStr]
-                }
-                throw new Error(`Variable ${keyStr} not present in environment`);
-            },
+            get: getPostmanEnvironment,
             // pm.environment.set(variableName:String, variableValue:String):function
             set: (keyStr, val) => {
                 globalDataLol[keyStr] = val;
@@ -158,5 +175,4 @@ const createPmSandbox = (reportsSpec) => {
 
 module.exports = {
     createPmSandbox,
-    globalDataLol
 };
