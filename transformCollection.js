@@ -56,21 +56,21 @@ const transformFolderToDescribe = async (item) => {
     const afterAll = getEventScriptByType(item, EV_TYPE.test);
     return [
         `describe('${item.name}', () => {`,
-        beforeAll === ''
+        beforeAll !== ''
             ? [
                 `${indent}beforeAll(async () => {`,
                 `${indent}${indent}${beforeAll}`,
                 `${indent}})`,
             ].join('\n')
             : null,
-        `${indent}${tests}`,
-        afterAll === ''
+        afterAll !== ''
             ? [
                 `${indent}afterAll(async () => {`,
                 `${indent}${indent}${afterAll}`,
                 `${indent}})`,
             ].join('\n')
             : null,
+        `${indent}${tests}`,
         `});`,
     ].filter(el => el !== null).join('\n');
 };

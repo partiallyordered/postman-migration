@@ -59,13 +59,17 @@
 // - Jest execution order:
 //   https://jestjs.io/docs/en/setup-teardown#order-of-execution-of-describe-and-test-blocks
 
+const argv = require('minimist')(process.argv.slice(2));
+const collection = require(argv.collection);
+
 // const collection = require('../Golden_Path_Mowali.postman_collection.json');
-const collection = require('./Golden_Path_Mojaloop.postman_collection.orig.json');
+// const collection = require('./Golden_Path_Mojaloop.postman_collection.orig.json');
 const util = require('util');
 const fs = require('fs').promises;
 const jsc = require('jscodeshift');
 const { transformCollection } = require('./transformCollection');
 const assert = require('assert').strict;
+
 
 // Whitelist these environment variables. Add to this array are variables that are set dynamically,
 // for example:
@@ -191,7 +195,7 @@ const nodeTypes = [
 // So we can do this:
 //   jsc(src).find(jsc.Identifier).filter(chk.VariableDeclaration)
 // Instead of:
-//   jsc(src).find(jsc.Identifier).filter((path) => jsc.VariableDeclaration.check(path))
+//   jsc(src).find(jsc.Identifier).filter((path) => jsc.VariableDeclaration.check(path.value))
 const chk = Object.assign({}, ...nodeTypes.map(key => ({ [key]: jsc[key].check.bind(jsc[key]) })));
 const asrt = Object.assign({}, ...nodeTypes.map(key => ({ [key]: jsc[key].assert.bind(jsc[key]) })));
 const not = (f) => (...args) => !f(...args);
@@ -219,7 +223,8 @@ const preamble = [
     'const { promisify } = require(\'util\');',
     'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
-    'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
+    'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\');',
+    'const btoa = (str) => (str instanceof Buffer ? str : Buffer.from(str.toString(), \'binary\')).toString(\'base64\');',
     'const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));',
     'const SimWebSocket = require(\'./ws\');',
 ].join('\n');
@@ -295,6 +300,13 @@ const createOrReplaceOutputDir = async (name) => {
     const astTypesInScope = (path, astType) => jsc(path.scope.path)
         .find(astType)
         .filter((p) => p.scope === path.scope);
+
+    // From an expression such as pm.response().data.map return "map". I.e. the leaf of the
+    // MemberExpression.
+    const getMemberExpressionLeaf = (memExp) =>
+        memExp.value.property
+            ? getMemberExpressionLeaf(memExp.get('property'))
+            : memExp;
 
     // Given a path, find all identifiers in the same scope that are not object properties. I.e.
     // any identifier in the same scope that would result in a name clash or shadow if a variable
@@ -1466,6 +1478,87 @@ const createOrReplaceOutputDir = async (name) => {
     };
 
 
+    // Some places have requests in array maps. I.e. this pattern:
+    // [ some, data ].map((element) => {
+    //   pm.sendRequest(whatever, callback);
+    // });
+    //
+    // This has been transformed to this (roughly):
+    // [ some, data ].map((element) => {
+    //   const response = await pm.sendRequest(whatever);
+    //   callback(response);
+    // });
+    //
+    // This problem is that the mapping function `(element) => { etc }` is not async, but contains
+    // an async call.
+    //
+    // This is also a problem where we have some `await Promise.all` statements within a sync
+    // block. We will transform these also.
+    //
+    // Previously, because of Javascript's execution model, each of those map callbacks would have
+    // been executed sequentially (if not in a specific order). As we are not relying on them being
+    // out-of-order (I hope) we can transform them to:
+    // [ some, data ].reduce((promise, element) => promise.then(() => {
+    //   const response = await pm.sendRequest(whatever);
+    //   callback(response);
+    // }), Promise.resolve());
+    const transformArrayMapToAsyncReduce = (j) => j
+        .find(jsc.MemberExpression)
+        // get all pm.sendRequest and Promise.all
+        .filter((path) =>
+            astNodesAreEquivalent(path, buildNestedMemberExpression(['pm', 'sendRequest'])) ||
+            astNodesAreEquivalent(path, buildNestedMemberExpression(['Promise', 'all']))
+        )
+        // filter out any that we do not `await`
+        .filter((path) => jsc.AwaitExpression.check(path.parentPath.parentPath.value))
+        // filter out any where the scope they're in is already async
+        .filter((path) => path.scope.path.value.async === false)
+        // filter out any that are not within a .map call
+        .filter((path) =>
+            // this is a callExpression. The .callee needs to be a MemberExpression with a .map.
+            // We'll have to dig down through child MemberExpressions to the leaf and confirm that
+            // it's a .map.
+            'map' === getMemberExpressionLeaf(path.scope.path.parentPath.parentPath.get('callee')).value.name
+        )
+        .forEach((path) => {
+            // Prepend the existing .map callback arguments with the promise argument. We will take
+            // advantage of the fact that .reduce has the same function signature as .map with the
+            // exception of the accumulator.
+            const callback = path.scope.path;
+            const currentParams = callback.get('params');
+            currentParams.replace([jsc.identifier('promise'), ...currentParams.value])
+
+            // Wrap the existing callback body in promise.then
+            const callbackBody = callback.get('body');
+            callbackBody.replace(
+                jsc.callExpression(
+                    jsc.memberExpression(
+                        jsc.identifier('promise'),
+                        jsc.identifier('then'),
+                    ),
+                    [
+                        // It doesn't seem like we can construct an async ArrowFunctionExpression
+                        // so we construct an ArrowFunctionExpression then set the async property.
+                        // https://github.com/benjamn/ast-types/issues/264
+                        Object.assign(
+                            jsc.arrowFunctionExpression(
+                                [],
+                                callbackBody.value,
+                            ),
+                            { async: true }
+                        )
+                    ]
+                )
+            );
+
+            // Append Promise.resolve() to the .map arguments
+            const args = path.scope.path.parentPath.parentPath.get('arguments');
+            args.replace([...args.value, jsc.callExpression(buildNestedMemberExpression(['Promise','resolve']), [])]);
+
+            // Rename .map to .reduce
+            getMemberExpressionLeaf(path.scope.path.parentPath.parentPath.get('callee')).replace(jsc.identifier('reduce'));
+        });
+
     // WARNING: Order _matters_. These are _mutations_ and the order they are performed in can
     // affect the result.
     //
@@ -1508,6 +1601,8 @@ const createOrReplaceOutputDir = async (name) => {
     removeResponseResponseSize(j);
     assertNoEval(j);
     replacePmTest(j);
+    transformArrayMapToAsyncReduce(j);
+    // assertNoAwaitInSyncBody(j);
 
     await fs.writeFile(testFileName, `${preamble}\n${j.toSource({ tabWidth: 4 })}`);
 
