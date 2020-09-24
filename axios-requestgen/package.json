@@ -31,7 +31,7 @@
     "axios": "0.19.2",
     "chai": "^4.2.0",
     "form-data": "3.0.0",
-    "mocha": "^8.0.1",
+    "mocha": "^8.1.3",
     "pretty-ms": "^7.0.0",
     "qs": "6.9.2",
     "recursive-readdir": "^2.2.2"
