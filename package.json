@@ -13,7 +13,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "jscodeshift": "^0.10.0",
+    "jsc-utils": "msk-/jsc-utils#44db8c159a51edd413b4d8fcb1afbb3645dc60a8",
+    "jscodeshift": "^0.11.0",
     "postman-collection": "^3.6.4",
     "recast": "^0.19.1"
   },
