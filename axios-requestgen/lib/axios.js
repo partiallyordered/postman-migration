@@ -203,12 +203,8 @@ function getOptions () {
  * @param {Boolean} options.followRedirect - whether to enable followredirect
  * @param {Boolean} options.trimRequestBody - whether to trim fields in request body or not
  * @param {Number} options.requestTimeout : time in milli-seconds after which request will bail out
- * @param {Function} callback - callback function with parameters (error, snippet)
  */
-function convert (request, options, callback) {
-  if (!_.isFunction(callback)) {
-    throw new Error('NodeJS-Axios-Converter: callback is not valid function');
-  }
+function convert (request, options) {
   options = sanitizeOptions(options, getOptions());
 
   //  String representing value of indentation required
@@ -217,7 +213,7 @@ function convert (request, options, callback) {
   indentString = options.indentType === 'Tab' ? '\t' : ' ';
   indentString = indentString.repeat(options.indentCount);
 
-  return callback(null, makeSnippet(request, indentString, options));
+  return makeSnippet(request, indentString, options);
 }
 
 module.exports = {

@@ -13,7 +13,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "jsc-utils": "msk-/jsc-utils#44db8c159a51edd413b4d8fcb1afbb3645dc60a8",
+    "jsc-utils": "msk-/jsc-utils#e22b26c02dcd44ce282a25877d9482a734d4eaa8",
     "jscodeshift": "^0.11.0",
     "postman-collection": "^3.6.4",
     "recast": "^0.19.1"
@@ -21,8 +21,8 @@
   "devDependencies": {
     "axios": "^0.19.2",
     "chai": "^4.2.0",
-    "jest": "^26.1.0",
-    "jest-html-reporters": "^2.0.2",
+    "jest": "^26.5.3",
+    "jest-html-reporters": "^2.1.0",
     "jsrsasign": "^8.0.20",
     "moment": "^2.27.0",
     "tv4": "^1.3.0",

@@ -56,7 +56,9 @@
 // - Jest execution order:
 //   https://jestjs.io/docs/en/setup-teardown#order-of-execution-of-describe-and-test-blocks
 
-const collection = require('../test-scripts/postman/Golden_Path_Mowali.postman_collection.json');
+const recast = require('recast');
+const collection = require('../../../ml/postman/Golden_Path_Mojaloop.postman_collection.json');
+const pmEnv = require('../../../casablanca/test-scripts/postman/environments/Casa-DEV.postman_environment.json');
 const util = require('util');
 const fs = require('fs').promises;
 const jsc = require('jscodeshift');
@@ -73,7 +75,6 @@ const {
     identifiersInSameScope,
     not,
     prettyPrint,
-    summarise,
 } = require('jsc-utils');
 
 // Whitelist these environment variables. Add to this array variables that are set dynamically,
@@ -112,7 +113,7 @@ const envWhitelist = [
     'ZMWUGXChannelId',
 ];
 const environment = new Map([
-    ...require('../test-scripts/postman/environments/Casa-DEV.postman_environment.json').values.map(({ key, value }) => [key, value]),
+    ...pmEnv.values.map(({ key, value }) => [key, value]),
     ...envWhitelist.map((v) => ([v, undefined])) // map to the [key,value] format expected by the constructor
 ]);
 const set = require('./set');
@@ -169,7 +170,16 @@ const createOrReplaceOutputDir = async (name) => {
     const j = jsc(src);
     const testCmd = require('./package.json').scripts.test.split(' ');
     const testFileName = testCmd[testCmd.length - 1];
-    fs.writeFile(`${testFileName.replace(/\.js$/, '-precodemod.js')}`, `${preamble}${src}`);
+    // Don't need to wait for (await) this.
+    fs.writeFile(
+        `${testFileName.replace(/\.js$/, '-precodemod.js')}`,
+        recast.prettyPrint(recast.parse(`${preamble}${src}`)).code
+    );
+
+    const printCode = (j) => fs.writeFile(
+        `${testFileName.replace(/\.js$/, '-error.js')}`,
+        recast.prettyPrint(j.getAST()[0].value).code
+    );
 
     // Ensure all pm.sendRequest calls are HTTP GET requests made with a POJO as the first
     // argument.
@@ -453,7 +463,7 @@ const createOrReplaceOutputDir = async (name) => {
     //
     // Also, replace all remaining usage of `{{var_name}}` with pm.environment.get('var_name').
     const localsVarName = 'locals';
-    const pmVariableRegex = /{{[^}]+}}/; // Anything that looks a bit like {{var_name}}
+    const pmVariableRegex = /{{[^}]+}}/g; // Anything that looks a bit like {{var_name}}
     const replaceVariableUsage = (j) => {
         // TODO: note that we don't consider scope _at all_ here. This is a bit of a disaster. This
         // is one place we could analyse the scope of pm.environment.set calls and allow or
@@ -501,26 +511,70 @@ const createOrReplaceOutputDir = async (name) => {
                         buildNestedMemberExpression(['pm', 'variables', 'set'])
                     ))
                     .forEach((pmVarSetCallExpression) => {
+                        const isTemplateLiteral = jsc.TemplateLiteral.check(pmVarSetCallExpression.value.arguments[0]);
                         assert(
-                            jsc.Literal.check(pmVarSetCallExpression.value.arguments[0]),
-                            'Expected first argument to pm.variables.set to be a string literal'
+                            jsc.Literal.check(pmVarSetCallExpression.value.arguments[0]) || isTemplateLiteral,
+                            'Expected first argument to pm.variables.set to be a string literal, or a template literal'
+                        );
+                        // _Where_ a template literal is used in pm.variables.set, expect all
+                        // expressions in that template literal to be
+                        // pm.(environment).get. For example:
+                        //    pm.variables.set(`${pm.environment.get("some_rubbish")}blah`)
+                        assert(
+                            !isTemplateLiteral || (
+                                pmVarSetCallExpression.value.arguments[0].expressions.every(callExpressionMatching(/^pm\.environment\.get$/)) &&
+                                pmVarSetCallExpression.value.arguments[0].expressions.every((node) => environment.has(node.arguments[0].value))
+                            ),
+                            'Expected all template literal expressions in the first argument of pm.variables.set expressions to be pm.environment.get calls'
+                        );
+                        // Make sure the aforementioned variable from the template literal
+                        // expression exists in the Postman environment
+                        assert(
+                            !isTemplateLiteral || pmVarSetCallExpression.value.arguments[0].expressions.every(callExpressionMatching(/^pm\.environment\.get$/)),
+                            'Expected all template literal expressions in the first argument of pm.variables.set expressions to be pm.environment.get calls'
                         );
                         assert(
                             pmVarSetCallExpression.value.arguments.length === 2,
                             'Expected pm.variables.set to have exactly two arguments'
                         );
-                        const varName = pmVarSetCallExpression.value.arguments[0].value;
-                        // Replace the `pm.variables.set` call with a variable assignment
-                        const varAssignment = jsc.assignmentExpression(
-                            "=",
-                            jsc.memberExpression(
-                                jsc.identifier(localsVarName),
-                                jsc.identifier(varName)
-                            ),
-                            pmVarSetCallExpression.value.arguments[1]
-                        );
-                        varNames.add(pmVarSetCallExpression.value.arguments[0].value);
-                        pmVarSetCallExpression.replace(varAssignment);
+
+                        // Get the data from the environment config, then intersperse the
+                        // quasis and expressions to produce the evaluated template literal as
+                        // the new variable name
+                        // TODO: possible/better to do this _using_ eval?
+                        const evaluateTemplateLiteralFromPmEnv = (node) => Array
+                            .from({ length: node.expressions.length + node.quasis.length }, (_, i) =>
+                                i % 2 === 0
+                                ? node.quasis[i >> 1].value.raw // TODO: re-check the cooked/raw thing
+                                : environment.get(node.expressions[i >> 1].arguments[0].value)
+                            )
+                            .join(''); // TODO: ensure the variable name is valid, i.e. remove whitespace etc.
+
+                        // TODO: assert(varName is a valid variable name) - or do we need to? The
+                        // environment key must be a valid JSON key. We probably need to.
+                        const varName = isTemplateLiteral
+                            ? evaluateTemplateLiteralFromPmEnv(pmVarSetCallExpression.value.arguments[0])
+                            : pmVarSetCallExpression.value.arguments[0].value;
+
+                        // If the variable name exists in environment variables, it was probably
+                        // intended as a call to pm.environment.set, rather than a call to
+                        // pm.variables.set. In this case, we'll replace it with a call to
+                        // pm.environment.set. Otherwise, replace the `pm.variables.set` call with
+                        // a variable assignment.
+                        if (isTemplateLiteral && environment.has(varName)) {
+                            pmVarSetCallExpression.get('callee').get('object').get('property').replace(jsc.identifier('environment'));
+                        } else {
+                            const varAssignment = jsc.assignmentExpression(
+                                "=",
+                                jsc.memberExpression(
+                                    jsc.identifier(localsVarName),
+                                    jsc.identifier(varName)
+                                ),
+                                pmVarSetCallExpression.value.arguments[1]
+                            );
+                            varNames.add(pmVarSetCallExpression.value.arguments[0].value);
+                            pmVarSetCallExpression.replace(varAssignment);
+                        }
                     });
 
                 // insert the `locals` object at the beginning of the `it` callback function statement
@@ -631,7 +685,6 @@ const createOrReplaceOutputDir = async (name) => {
     // Notify the user of anything that looks like variables that haven't been replaced
     // TODO: this needs to look in template literals also
     const notifyUnreplacedVariables = (j) => {
-        console.log('Found the following variable-like strings that have not been replaced with pm.environment.get or local variables:');
         const matchesInLiterals = j.find(jsc.Literal)
             .filter((path) =>
                 typeof path.value.value === 'string' && pmVariableRegex.test(path.value.value)
@@ -646,12 +699,16 @@ const createOrReplaceOutputDir = async (name) => {
             .nodes()
             .map(n => [...n.raw.matchAll(pmVariableRegex)]);
 
-        [...matchesInLiterals, ...matchesInTemplateLiterals]
+        const allMatches = [...matchesInLiterals, ...matchesInTemplateLiterals]
             .reduce((acc, cv) => [...acc, ...cv]) // flatten our _array of arrays of matches_ into an _array of matches_
             .map(m => m[0]) // take the first element of each match, the matched string
             .sort()
             .reduce((acc, cv) => acc.includes(cv) ? acc : [...acc, cv], []) // remove duplicates
-            .forEach(mStr => console.log(mStr));
+
+        if (allMatches.length > 0 ) {
+            console.log('Found the following variable-like strings that have not been replaced with pm.environment.get or local variables:');
+            allMatches.forEach(mStr => console.log(mStr));
+        }
     };
 
 
@@ -670,36 +727,80 @@ const createOrReplaceOutputDir = async (name) => {
         'Expected all pm.variables usage to be removed'
     );
 
+    // Remove any pm variables or environment that are set but not read
+    const warnUnusedPmVars = (j) => {
+        // We'll check to see whether the variable is used by any variable get calls. We'll ignore
+        // the scope rules (linked below) and just treat it as though any variable can be used from
+        // any scope. This means we may erroneously _not_ remove some variables. For example, a
+        // variable set with pm.variables.set is not available when calling pm.environment.get. We
+        // will treat it as though there is only a single variable scope for simplicity of
+        // implementation. This may need to be revisited in future.
+        // https://learning.postman.com/docs/sending-requests/variables/#variable-scopes
+        const isPmKeyGet = (varType) => (path, key) => astNodesAreEquivalent(
+            path.value,
+            jsc.callExpression(
+                buildNestedMemberExpression(['pm', varType, 'get']),
+                [jsc.literal(key)],
+            )
+        );
+        // Note that according to the docs pm.iterationData.set and pm.collectionVariables.set are
+        // not valid. The author of _this_ code has not verified this assertion.
+        const isPmVarGet = (key) => ['environment', 'collectionVariables', 'variables', 'globals']
+            .map(isPmKeyGet)
+            .reduce((f, g) => (path) => f(path, key) || g(path, key));
+
+        const envGetColl = j.find(jsc.CallExpression)
+            .filter(callExpressionMatching(/^pm\.(environment|variables|globals|collectionVariables)\.get$/))
+
+        console.log('Found the following unused pm vars:');
+        j.find(jsc.CallExpression)
+            .filter(callExpressionMatching(/^pm\.(environment|variables|globals)\.set$/))
+            .filter((path) => !chk.TemplateLiteral(path.value.arguments[0])) // Template literals are too hard for now- not prioritised
+            .filter((setPath) => 0 ===
+                // See if we can find a pm.(environment|variables|globals|collectionVariables).get
+                // corresponding to this pm.(environment|variables|globals).set
+                // const key = path.arguments[0];
+                envGetColl.filter((getPath) => astNodesAreEquivalent(getPath.value.arguments[0], setPath.value.arguments[0]))
+                    .size()
+                    // .forEach((path) => console.log(recast.prettyPrint(path.value).code))
+            )
+            .forEach((path) => {
+                console.log('arg is template literal:', !chk.TemplateLiteral(path.value.arguments[0]));
+                console.log(recast.prettyPrint(path.value).code)
+            });
+        console.log('END');
+    };
 
     // Replace this pattern:
     //   pm.test("Status code is blah", function () {
+    //     pm.response.to.have.status(200);
+    //   });
+    // and this pattern:
+    //   pm.test("Status code is blah", () => {
     //     pm.response.to.have.status(200);
     //   });
     // With jest's
     //   expect(pm.response.status).toBe(200);
     const replaceTestResponse = (j) => {
         // Utilities
-        const testResponsePattern = (desc, code) =>
+        const pmTestExpr = jsc.memberExpression(jsc.identifier('pm'), jsc.identifier('test'));
+        const funcBodyBlock = (code) => jsc.blockStatement([
+            jsc.expressionStatement(
+                jsc.callExpression(
+                    buildNestedMemberExpression(['pm', 'response', 'to', 'have', 'status']),
+                    [jsc.literal(code)]
+                )
+            )
+        ]);
+        const testResponsePatternFunc = (desc, code) =>
             jsc.callExpression(
-                jsc.memberExpression(
-                    jsc.identifier('pm'),
-                    jsc.identifier('test'),
-                ),
-                [
-                    jsc.literal(desc),
-                    jsc.functionExpression(
-                        null,
-                        [],
-                        jsc.blockStatement([
-                            jsc.expressionStatement(
-                                jsc.callExpression(
-                                    buildNestedMemberExpression(['pm', 'response', 'to', 'have', 'status']),
-                                    [jsc.literal(code)]
-                                )
-                            )
-                        ])
-                    )
-                ]
+                pmTestExpr,
+                [ jsc.literal(desc), jsc.functionExpression(null, [], funcBodyBlock(code)) ]
+            );
+        const testResponsePatternArrowFunc = (desc, code) =>
+            jsc.callExpression(
+                pmTestExpr,
+                [ jsc.literal(desc), jsc.arrowFunctionExpression([], funcBodyBlock(code)) ]
             );
 
         const signatureMatches = (path) =>
@@ -716,7 +817,7 @@ const createOrReplaceOutputDir = async (name) => {
                 const desc = path.value.arguments[0].value;
                 const code = path.value.arguments[1].body.body[0].expression.arguments[0].value;
                 // Do this check here rather than in a filter because it's probably expensive.
-                if (astNodesAreEquivalent(path.value, testResponsePattern(desc, code))) {
+                if (astNodesAreEquivalent(path.value, testResponsePatternFunc(desc, code)) || astNodesAreEquivalent(path.value, testResponsePatternArrowFunc(desc, code))) {
                     path.replace(
                         jsc.callExpression(
                             jsc.memberExpression(
@@ -738,7 +839,7 @@ const createOrReplaceOutputDir = async (name) => {
     // Replace all pm.response.code with resp.status
     const replacePmResponseCode = (j) => j
         .find(jsc.MemberExpression)
-        .filter((path) => jsc(path).toSource().match(/^pm.response.code$/))
+        .filter((path) => recast.prettyPrint(path.value).code.match(/^pm.response.code$/))
         .forEach((path) =>
             path.replace(
                 jsc.memberExpression(
@@ -751,7 +852,7 @@ const createOrReplaceOutputDir = async (name) => {
     // Replace all pm.response.json() with resp.data
     const replacePmResponseJson = (j) => j
         .find(jsc.CallExpression)
-        .filter((path) => jsc(path).toSource().match(/^pm.response.json\(\)$/))
+        .filter((path) => recast.prettyPrint(path.value).code.match(/^pm.response.json\(\)$/))
         .forEach((path) =>
             path.replace(
                 jsc.memberExpression(
@@ -794,30 +895,39 @@ const createOrReplaceOutputDir = async (name) => {
         //   pm.test("something failed", function () {
         //     throw new Error('whatever');
         //   })
-        .forEach((path) => {
-            // If there's no else clause, we don't need to check it
-            if (path.value.alternate == null) {
-                return;
+        .filter((path) => {
+            // TODO: the above was a forEach previously, asserting the various following properties
+            // of the path. However, the Mojaloop golden path has one example of responseSize()
+            // usage that does retries the test in the alternate clause. Therefore, this was
+            // changed to a filter. For the migration to be fully automated this transformation
+            // will be required.
+            try {
+                // If there's no else clause, we don't need to check it
+                if (path.value.alternate == null) {
+                    return;
+                }
+                // assert there's exactly one statement in the body
+                assert(path.value.alternate.body.length === 1);
+                // assert that's an ExpressionStatement
+                const elseExpressionStmt = path.value.alternate.body[0];
+                assert(jsc.ExpressionStatement.check(elseExpressionStmt));
+                // assert that expression statement is a callexpression `pm.test`
+                assert(
+                    astNodesAreEquivalent(
+                        elseExpressionStmt.expression.callee,
+                        buildNestedMemberExpression(['pm', 'test'])
+                    )
+                );
+                // assert that the callback to pm.test is just a single throw
+                const pmTestCall = elseExpressionStmt.expression;
+                assert(pmTestCall.arguments.length === 2);
+                const pmTestCallback = pmTestCall.arguments[1];
+                assert(jsc.Function.check(pmTestCallback));
+                assert(pmTestCallback.body.body.length === 1);
+                assert(jsc.ThrowStatement.check(pmTestCallback.body.body[0]));
+            } catch (err) {
+                return false;
             }
-            // assert there's exactly one statement in the body
-            assert(path.value.alternate.body.length === 1);
-            // assert that's an ExpressionStatement
-            const elseExpressionStmt = path.value.alternate.body[0];
-            assert(jsc.ExpressionStatement.check(elseExpressionStmt));
-            // assert that expression statement is a callexpression `pm.test`
-            assert(
-                astNodesAreEquivalent(
-                    elseExpressionStmt.expression.callee,
-                    buildNestedMemberExpression(['pm', 'test'])
-                )
-            );
-            // assert that the callback to pm.test is just a single throw
-            const pmTestCall = elseExpressionStmt.expression;
-            assert(pmTestCall.arguments.length === 2);
-            const pmTestCallback = pmTestCall.arguments[1];
-            assert(jsc.Function.check(pmTestCallback));
-            assert(pmTestCallback.body.body.length === 1);
-            assert(jsc.ThrowStatement.check(pmTestCallback.body.body[0]));
         })
         .forEach((path) => {
             path.replace(
@@ -826,23 +936,28 @@ const createOrReplaceOutputDir = async (name) => {
         });
 
 
-    const assertPmResponseIsReplaced = (j) => assert(0 === j
-        .find(jsc.MemberExpression)
-        .filter((path) =>
-               jsc.Identifier.check(path.value.object)
-            && jsc.Identifier.check(path.value.property)
-            && path.value.object.name === 'pm'
-            && path.value.property.name === 'response')
-        .map((path) => {
-            // work upward until the parent is not a memberexpression or a callexpression
-            let curr = path;
-            while (jsc.MemberExpression.check(curr.parentPath.value) || jsc.CallExpression.check(curr.parentPath.value)) {
-                curr = curr.parentPath;
-            }
-            return curr;
-        })
-        .size()
-    );
+    const assertPmResponseIsReplaced = (j) => {
+        const pmResponse = j
+            .find(jsc.MemberExpression)
+            .filter((path) =>
+                jsc.Identifier.check(path.value.object)
+                && jsc.Identifier.check(path.value.property)
+                && path.value.object.name === 'pm'
+                && path.value.property.name === 'response')
+            .map((path) => {
+                // work upward until the parent is not a memberexpression or a callexpression
+                let curr = path;
+                while (jsc.MemberExpression.check(curr.parentPath.value) || jsc.CallExpression.check(curr.parentPath.value)) {
+                    curr = curr.parentPath;
+                }
+                return curr;
+            });
+        if (0 !== pmResponse.size()) {
+            const code = pmResponse.nodes().map((node) => recast.prettyPrint(node).code).join('\n');
+            printCode(j); // TODO: remove
+            throw new Error(`Expected no instances of pm.response to remain, but found ${pmResponse.size()}:\n${code}`);
+        }
+    };
 
 
     // After transformation, some places in the code do this:
@@ -894,6 +1009,8 @@ const createOrReplaceOutputDir = async (name) => {
     //   eval(pm.environment.get('jrsassign'))
     // The variable declarations mean there isn't an error when the library is eval'ed.
     // Get rid of the horrible lot.
+    // Note that the library is called jsrsasign, i.e. javascript RSA sign, but it is used in these
+    // collections as jrsassign.
     const removeJsRsaSignEvalAndRelatedRubbish = (j) => {
         j.find(jsc.CallExpression)
             .filter((path) => astNodesAreEquivalent(
@@ -925,6 +1042,11 @@ const createOrReplaceOutputDir = async (name) => {
                    astNodesAreEquivalent(path.value, varEqualsEmptyObjDeclaration('window'))
                 || astNodesAreEquivalent(path.value, varEqualsEmptyObjDeclaration('navigator'))
             )
+            .remove();
+
+        j.find(jsc.CallExpression)
+            .filter(callExpressionMatching('pm', 'environment', 'set'))
+            .filter((path) => chk.Literal(path.value.arguments[0]) && path.value.arguments[0].value === 'jrsassign')
             .remove();
     };
 
@@ -1008,12 +1130,18 @@ const createOrReplaceOutputDir = async (name) => {
                     appendComment(path.value, comment);
                 } else {
                     // An ArrowFunctionExpression can have an expression as a body. Here we handle
-                    // the case of a BlockStatement as a body
-                    if (jsc.BlockStatement.check(callback.value.body)) {
-                        const callbackBody = callback.get('body').get('body');
-                        appendComment(callbackBody.value[0], comment);
-                        // Insert the current block before the pm.test call
-                        path.parentPath.insertBefore(...callbackBody.value);
+                    // the case of a BlockStatement as a body.
+                    if (chk.BlockStatement(callback.value.body)) {
+                        // A callback body of length === 0 tends to look like this:
+                        //   pm.test('Test passed', function() {}})
+                        // If we do nothing here, it'll just be removed.
+                        if (callback.value.body.length > 0) {
+                            const callbackBody = callback.get('body').get('body');
+
+                            appendComment(callbackBody.value[0], comment);
+                            // Insert the current block before the pm.test call
+                            path.parentPath.insertBefore(...callbackBody.value);
+                        }
                     } else {
                         const callbackBody = callback.get('body');
                         appendComment(callbackBody.value, comment);
@@ -1033,7 +1161,7 @@ const createOrReplaceOutputDir = async (name) => {
     // Where the following rough pattern exists:
     //   setTimeout(() => {
     //     const response = await pm.sendRequest(`http://${simulatorTestEndpoint}`);
-    //     pm.expect(response).to('blah blah blah');
+    //     pm.expect(response).toBe('blah blah blah');
     //     // assertions
     //   }, timeout)
     // We replace it with this:
@@ -1066,6 +1194,7 @@ const createOrReplaceOutputDir = async (name) => {
                         .map((i) => path.get('body').get(`${i}`))
                         .filter(isSetTimeoutExpressionStatement)
             )
+            // TODO: why do the following?
             // Filter out any setTimeout calls where the callback function body contains more than one
             // pm.sendRequest call
             .filter((setTimeoutExprStmt) =>
@@ -1172,6 +1301,9 @@ const createOrReplaceOutputDir = async (name) => {
                 const id = lastDeclaration.value.id.name;
                 waitOnId = {
                     after: lastDeclaration.parentPath.parentPath, // should be the VariableDeclaration rather than the VariableDeclarator
+                    // TODO: the following, commented line should replace the uncommented line
+                    // following it. Generate output using each and compare.
+                    // code: recast.parse(`const wsMessage${mod} = ws.getLatestByIdOrWait(${id});`),
                     code: jsc(`const wsMessage${mod} = ws.getLatestByIdOrWait(${id});`).getAST()[0].value.program.body[0],
                 };
             }
@@ -1237,10 +1369,26 @@ const createOrReplaceOutputDir = async (name) => {
                 );
             // 4. assert that there's exactly one `const resp = await axios(config)` call- this
             //    is the "request" of the test (i.e. not the pre-request script or the "test")
-            assert(
-                requestStatements.length === 1,
-                'Expect exactly one instance of `await axios` in the scope of the setTimeout call'
-            );
+            try {
+                assert(
+                    requestStatements.length === 1,
+                    `Expected exactly one instance of \`await axios\` in the scope of the setTimeout call. Found ${requestStatements.length}.`
+                );
+            }
+            catch (err) {
+                console.log('FIXME');
+                break;
+                console.log(testBody.parent);
+                console.log(recast.prettyPrint(testBody.parent.value).code);
+                console.log(requestStatements.map((path) => recast.prettyPrint(path.value).code));
+                console.log(testBody.value[0].loc.start);
+                console.log(testBody.value[0].loc.end);
+                fs.writeFile(
+                    `${testFileName.replace(/\.js$/, '-error.js')}`,
+                    recast.prettyPrint(j.getAST()[0].value).code
+                );
+                throw err;
+            }
             const requestStatement = requestStatements[0];
 
             const newCode = setTimeoutExprStmts.map(buildNewCode(requestStatement));
@@ -1257,7 +1405,7 @@ const createOrReplaceOutputDir = async (name) => {
                 pmSendRequest.parentPath.replace(newPmSendRequest)
             );
 
-            // Insert the await for 
+            // Insert the await for each request
             newCode.filter(({ waitOnId }) => waitOnId).forEach(({ waitOnId }) => {
                 waitOnId.after.insertAfter(waitOnId.code);
             });
@@ -1308,6 +1456,11 @@ const createOrReplaceOutputDir = async (name) => {
     //   return promisify(requestCodeGen.convert)(pmRequest, opts);
     // assertPmHttpRequestsAreAllPojos(j);
     //
+    // If you, the reader, are wondering "why do these strange things?": the answer is that these
+    // transformations target a specific postman collection suite. They haven't been written for
+    // general consumption. If a transformation seems particularly strange, that's because its
+    // input was present in said postman collection. In some cases, it was convenient to perform
+    // certain transformations to avoid having to perform others.
     removeAnnoyingLogging(j);
     transformPmSendRequestToAsync(j);
     assertSetTimeoutCalledWithTwoArgs(j);
@@ -1319,10 +1472,16 @@ const createOrReplaceOutputDir = async (name) => {
     replaceSetTimeout(j);
     assertNoSetTimeout(j);
     replaceTestResponse(j);
+
+    // replacePmResponseText(j);
+    // replacePmResponseAssertions(j);
+
+    replaceVariableUsage(j);
+    // warnUnusedPmVars(j);
+
     replacePmResponseJson(j);
     replacePmResponseCode(j);
     assertPmResponseIsReplaced(j);
-    replaceVariableUsage(j);
     notifyUnreplacedVariables(j);
     assertPmVariablesCallsGone(j);
     transformForEachToAwaitPromiseAll(j);
@@ -1330,7 +1489,13 @@ const createOrReplaceOutputDir = async (name) => {
     assertNoEval(j);
     replacePmTest(j);
 
-    await fs.writeFile(testFileName, `${preamble}${j.toSource({ tabWidth: 4 })}`);
+    const pp = `${preamble}\n\n${recast.prettyPrint(j.getAST()[0].value).code}`;
+    await fs.writeFile(
+        testFileName,
+        pp
+        // `${preamble}${j.toSource()}`
+        // recast.prettyPrint(recast.parse(`${preamble}${j.toSource()}`)).code
+    );
 
 
     // TODO: transformations:
@@ -1486,6 +1651,8 @@ const createOrReplaceOutputDir = async (name) => {
     //         stuff
     //       }
     //     Note: they may be nested. Why wouldn't they be..?
+    // 40. Replace `await axios` with the sdk-standard-components request as we don't need the
+    //     overhead of axios, especially as we're not interested in supporting browser requests.
 
 
     // Examples:
