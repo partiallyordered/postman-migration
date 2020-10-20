@@ -6,7 +6,7 @@
   "scripts": {
     "test": "jest --detectOpenHandles --bail=1 ./res.test.js",
     "testsimple": "jest --bail --testTimeout=30000 ./res.test.js",
-    "transform": "node migrate.js",
+    "transform": "nearleyc pmvars.ne -o pmvarsgrammar.js && node migrate.js",
     "testci": "jest ./res.test.js"
   },
   "keywords": [],
@@ -15,7 +15,10 @@
   "dependencies": {
     "jsc-utils": "msk-/jsc-utils#e22b26c02dcd44ce282a25877d9482a734d4eaa8",
     "jscodeshift": "^0.11.0",
-    "postman-collection": "^3.6.4",
+    "nearley": "^2.19.7",
+    "postman-collection": "^3.6.4"
+  },
+  "peerDependencies": {
     "recast": "^0.19.1"
   },
   "devDependencies": {

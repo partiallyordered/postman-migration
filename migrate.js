@@ -56,6 +56,8 @@
 // - Jest execution order:
 //   https://jestjs.io/docs/en/setup-teardown#order-of-execution-of-describe-and-test-blocks
 
+const nearley = require('nearley');
+const pmVarGrammar = nearley.Grammar.fromCompiled(require('./pmvarsgrammar.js'));
 const recast = require('recast');
 const collection = require('../../../ml/postman/Golden_Path_Mojaloop.postman_collection.json');
 const pmEnv = require('../../../casablanca/test-scripts/postman/environments/Casa-DEV.postman_environment.json');
@@ -468,8 +470,9 @@ const createOrReplaceOutputDir = async (name) => {
         // TODO: note that we don't consider scope _at all_ here. This is a bit of a disaster. This
         // is one place we could analyse the scope of pm.environment.set calls and allow or
         // disallow the use of pm.environment.get calls for the same variables. Note however that
-        // due to our implementation of the postman sandbox, attempted access of a non-existent
-        // variable is now a runtime error rather than a silent failure.
+        // the problem of use-before-set is mitigated somewhat due to our implementation of the
+        // postman sandbox: attempted access of a non-existent variable is now a runtime error
+        // rather than a silent failure.
         const environmentNotInEnvironmentFile = j
             .find(jsc.CallExpression)
             .filter((path) => astNodesAreEquivalent(
@@ -494,7 +497,91 @@ const createOrReplaceOutputDir = async (name) => {
 
         // Create a set containing keys from both the environment file map and the
         // pm.environment.set map.
-        const allEnvVarNames = new Set([...environmentNotInEnvironmentFile, ...environment.keys()]);
+        const allEnvVarNames = new Map([...environmentNotInEnvironmentFile.map(el => [el]), ...environment]);
+
+        // turn
+        //   some{{super{{nested}}postman}}variable{{string}}
+        // into
+        //   [
+        //     [
+        //       { value: 'some' },
+        //       {
+        //         var: [
+        //           { value: 'super' },
+        //           { var: [ { value: 'nested' } ] },
+        //           { value: 'postman' }
+        //         ]
+        //       },
+        //       { value: 'variable' },
+        //       { var: [ { value: 'string' } ] },
+        //     ]
+        //   ]
+        // then into
+        //   `some${pm.environment.get(`super${locals.nested}postman`)}variable${pm.environment.get('string')}`
+        const transformPmVarString = (str, locals, localsVarName, pmEnvironment) => {
+            // Turn the parser output into a string usable in javascript
+            const transform = (transformation) => (e) => {
+                if (e.value) {
+                    return e.value;
+                } else if (e.var) {
+                    return transformation(e);
+                }
+                throw new Error('Unexpected data type');
+            };
+
+            // Turn the parser output into a string usable in javascript
+            const print = (e) => {
+                const d = e.var.length === 1 && e.var[0].value ? `'` : '`';
+                const varStr = e.var.map(transform(print)).join('');
+                if (locals.has(varStr)) {
+                    return `\${${localsVarName}.${varStr}}`;
+                }
+                if (pmEnvironment.has(varStr)) {
+                    return `\${pm.environment.get(${d}${varStr}${d})}`;
+                }
+                if (e.var.length !== 1) {
+                    try {
+                        const v = e.var.map(transform(evaluate)).join('');
+                        if (pmEnvironment.has(v)) {
+                            const result = `\${pm.environment.get(${d}${varStr}${d})}`;
+                            return result;
+                        }
+                        return `{{${varStr}}}`;
+                    } catch {
+                        return `{{${varStr}}}`;
+                    }
+                }
+                return `{{${varStr}}}`;
+            };
+
+            // Try to use the postman environment loaded to evaluate a postman environment variable
+            // value.
+            const evaluate = (e) => {
+                const varValue = e.var.length === 1
+                    ? pmEnvironment.get(e.var[0].value)
+                    : pmEnvironment.get(e.var.map(transform(evaluate)).join(''));
+                if (pmEnvironment.has(varValue)) {
+                    return pmEnvironment.get(varValue);
+                }
+                throw new Error(`Variable ${varValue} does not exist in environment`);
+            };
+
+            // The Nearley parser is a stream parser, and there doesn't appear to be a method to
+            // reset it, so we create a new one each time. A glance at the code suggests it isn't
+            // especially costly to do so.
+            const parser = new nearley.Parser(pmVarGrammar);
+            parser.feed(str);
+            // Multiple results corresponds to an ambiguous grammar. If this occurs, it will most
+            // likely need to be fixed. You'll need to modify the grammar pmvars.ne to support
+            // whatever string fails here.
+            // Documentation: https://nearley.js.org/docs/grammar
+            // Enjoy.
+            assert(
+                parser.results.length === 1,
+                `Expected a single result parsing postman "superstring" '${str}', got ${parser.results.length}.`
+            );
+            return `\`${parser.results[0].map(transform(print)).join('')}\``;
+        }
 
         return j
             .find(jsc.CallExpression)
@@ -662,22 +749,9 @@ const createOrReplaceOutputDir = async (name) => {
                         && allVarsRegex.test(path.value.value)
                     )
                     .forEach((path) => {
-                        // If there is a variable that is set by pm.variables.set('var_name'), we'll
-                        // replace it with locals.var_name
-                        const localVarsReplaced = [...varNames.values()]
-                            .reduce((pv, varName) => pv.replace(
-                                new RegExp(`{{${varName}}}`), `\${${localsVarName}.${varName}}`
-                            ), path.value.value)
-                        // Variables that are present in the environment file, _or have been set in the
-                        // environment with pm.environment.set, we'll replace with instances of
-                        // pm.environment.get
-                        const allVarsReplaced = [...allEnvVarNames.keys()]
-                            .reduce((pv, varName) => pv.replace(
-                                new RegExp(`{{${varName}}}`), `\${pm.environment.get('${varName}')}`
-                            ), localVarsReplaced);
-                        const newCode = `\`${allVarsReplaced}\``;
-                        const newNode = jsc(newCode).getAST()[0].value;
-                        path.replace(newNode);
+                        const newCode = transformPmVarString(path.value.value, varNames, localsVarName, allEnvVarNames);
+                        const newNode = recast.parse(newCode);
+                        path.replace(newNode.program.body[0].expression);
                     })
             })
     };
@@ -1472,10 +1546,6 @@ const createOrReplaceOutputDir = async (name) => {
     replaceSetTimeout(j);
     assertNoSetTimeout(j);
     replaceTestResponse(j);
-
-    // replacePmResponseText(j);
-    // replacePmResponseAssertions(j);
-
     replaceVariableUsage(j);
     // warnUnusedPmVars(j);
 
