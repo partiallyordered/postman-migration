@@ -19,7 +19,7 @@
     "recast": "^0.19.1"
   },
   "devDependencies": {
-    "axios": "^0.19.2",
+    "axios": "^0.21.1",
     "chai": "^4.2.0",
     "jest": "^26.1.0",
     "jest-html-reporters": "^2.0.2",
