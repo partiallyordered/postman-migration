@@ -7,12 +7,6 @@ module.exports = {
                 filename: 'results_api.html',
             },
         ],
-        [
-            '../../lib/json-jest-reporter/index.js',
-            {
-                outputFile: 'results_api.json',
-            },
-        ],
     ],
     testEnvironment: "node",
     testTimeout: 15000,

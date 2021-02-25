@@ -13,10 +13,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "jsc-utils": "msk-/jsc-utils#e22b26c02dcd44ce282a25877d9482a734d4eaa8",
+    "jsc-utils": "msk-/jsc-utils#82e74a8b025504f727b41901d5f6e5b059acf934",
     "jscodeshift": "^0.11.0",
     "nearley": "^2.19.7",
-    "postman-collection": "^3.6.4"
+    "postman-collection": "^3.6.4",
+    "recast": "^0.20.4"
   },
   "peerDependencies": {
     "recast": "^0.19.1"

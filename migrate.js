@@ -59,8 +59,10 @@
 const nearley = require('nearley');
 const pmVarGrammar = nearley.Grammar.fromCompiled(require('./pmvarsgrammar.js'));
 const recast = require('recast');
-const collection = require('../../../ml/postman/Golden_Path_Mojaloop.postman_collection.json');
-const pmEnv = require('../../../casablanca/test-scripts/postman/environments/Casa-DEV.postman_environment.json');
+const pmCollectionFile = '../../../ml/postman/Golden_Path_Mojaloop.postman_collection.json';
+const collection = require(pmCollectionFile);
+const envPath = '../../../casablanca/test-scripts/postman/environments/Casa-DEV.postman_environment.json';
+const pmEnv = require(envPath);
 const util = require('util');
 const fs = require('fs').promises;
 const jsc = require('jscodeshift');
@@ -105,6 +107,7 @@ const {
 //
 // See here for more on postman variables:
 // https://learning.postman.com/docs/sending-requests/variables/#variable-scopes
+// TODO: below, attempt to remove envWhitelist, is it still necessary?
 const envWhitelist = [
     'EURGHSChannelId',
     'RWFUGXChannelId',
@@ -127,6 +130,7 @@ const axiosResponseVarName = 'resp';
 // the transformations add them as they are required. (Alternatively, we could let the final eslint
 // pass identify when we've been naughty and added stuff we don't need to).
 const setTimeoutPromiseName = 'setTimeoutPromise';
+const isMowaliGp = /mowali/i.test(pmCollectionFile);
 const preamble = [
     'const tv4 = require(\'tv4\');',
     'const moment = require(\'moment\');',
@@ -138,12 +142,13 @@ const preamble = [
     'const axios = require(\'axios\').create({ validateStatus: () => true });',
     'const uuid = require(\'uuid\');',
     'const { createPmSandbox } = require(\'./pm\');',
-    'const { reportsSpec } = require(\'../iteration_data.json\')[0];',
-    'const pm = createPmSandbox(reportsSpec);',
+    isMowaliGp ? 'const { reportsSpec } = require(\'../iteration_data.json\')[0];' : '',
+    `const pm = createPmSandbox(${isMowaliGp ? 'reportsSpec' : ''});`,
     'const { promisify } = require(\'util\');',
-    'const pmEnv = require(\'../environments/Casa-DEV.postman_environment.json\').values;',
+    `const pmEnv = require('${envPath}').values;`,
     'pmEnv.forEach(({ key, value }) => pm.environment.set(key, value));',
     'const atob = (str) => Buffer.from(str, \'base64\').toString(\'binary\')',
+    `const btoa = (s) => (s instanceof Buffer ? s : Buffer.from(s.toString(), 'binary')).toString('base64');`,
     'const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));',
     'const SimWebSocket = require(\'./ws\');',
 ].join('\n');
@@ -1043,11 +1048,22 @@ const createOrReplaceOutputDir = async (name) => {
     //   await Promise.all(resp.data.map(async d => await pm.sendRequest(f(d))));
     const functionBodyContainsAwaitExpression = (fAstPath) =>
         jsc(fAstPath.get('body').get('body')).find(jsc.AwaitExpression).length > 0
+    const isArrayMapWithUnusedResult = (path) => {
+        // A check that we don't perform here (but do where this function is used) but should be
+        // performed to ensure this is a stand-alone `map` method call:
+        //   jsc.Identifier.check(path.value.callee.property)
+        const isMapMethod = path.value.callee.property.name === 'map';
+        // if the map call is just an ExpressionStatement then
+        //   - it is not chained e.g. with another .map or .filter and
+        //   - its result is not assigned anywhere
+        const isExpressionStatement = chk.ExpressionStatement(path.parentPath);
+        return isMapMethod && isExpressionStatement;
+    };
     const transformForEachToAwaitPromiseAll = (j) => j
         .find(jsc.CallExpression)
         .filter((path) => jsc.MemberExpression.check(path.value.callee))
         .filter((path) => jsc.Identifier.check(path.value.callee.property))
-        .filter((path) => path.value.callee.property.name === 'forEach')
+        .filter((path) => path.value.callee.property.name === 'forEach' || isArrayMapWithUnusedResult(path))
         .filter((path) => functionBodyContainsAwaitExpression(path.get('arguments').get('0')))
         .forEach((path) => {
             // assert that there is only one argument supplied to the `forEach` call
@@ -1100,6 +1116,22 @@ const createOrReplaceOutputDir = async (name) => {
                 )
             ))
             .remove();
+
+        j.find(jsc.IfStatement)
+            .filter((path) => astNodesAreEquivalent(
+                path.value.test,
+                jsc.unaryExpression(
+                    '!',
+                    jsc.callExpression(
+                        buildNestedMemberExpression(['pm', 'environment', 'get']),
+                        [
+                            jsc.literal('jrsassign')
+                        ]
+                    )
+                )
+            ))
+            .remove()
+
         // get rid of any 'var navigator' or 'var window' variabledeclarations
         const varEqualsEmptyObjDeclaration = (varName) =>
             jsc.variableDeclaration(
@@ -1119,8 +1151,13 @@ const createOrReplaceOutputDir = async (name) => {
             .remove();
 
         j.find(jsc.CallExpression)
-            .filter(callExpressionMatching('pm', 'environment', 'set'))
+            .filter(callExpressionMatching(/^pm\.environment\.set$/))
             .filter((path) => chk.Literal(path.value.arguments[0]) && path.value.arguments[0].value === 'jrsassign')
+            .remove();
+
+        j.find(jsc.CallExpression)
+            .filter((path) => path.value.callee?.name === 'it')
+            .filter((path) => path.value.arguments[0].value === 'Download JWS Signature Generation Package')
             .remove();
     };
 
@@ -1382,12 +1419,6 @@ const createOrReplaceOutputDir = async (name) => {
                 };
             }
 
-            // const newWsCode = jsc([
-            //     `const wsUrl${mod} = (` + jsc(requestUrl).toSource() + ').replace(/^(http)?s?(:\\\/\\\/)?/, \'ws://\');',
-            //     `const ws${mod} = new WebSocket(wsUrl${mod});`,
-            //     // `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', resolve));\n`,
-            //     `const wsMessage${mod} = new Promise((resolve) => ws${mod}.on(\'message\', (msg) => resolve(JSON.parse(msg))));\n`,
-            // ].join('\n')).getAST()[0].value.program.body;
             // 8. wait for the websocket to close:
             //      await new Promise((resolve) => ws.close(resolve));
             // We build the await outside the parser, because the await will fail to parse.
@@ -1441,27 +1472,14 @@ const createOrReplaceOutputDir = async (name) => {
                         )
                     )
                 );
-            // 4. assert that there's exactly one `const resp = await axios(config)` call- this
-            //    is the "request" of the test (i.e. not the pre-request script or the "test")
-            try {
-                assert(
-                    requestStatements.length === 1,
-                    `Expected exactly one instance of \`await axios\` in the scope of the setTimeout call. Found ${requestStatements.length}.`
-                );
-            }
-            catch (err) {
-                console.log('FIXME');
-                break;
-                console.log(testBody.parent);
-                console.log(recast.prettyPrint(testBody.parent.value).code);
-                console.log(requestStatements.map((path) => recast.prettyPrint(path.value).code));
-                console.log(testBody.value[0].loc.start);
-                console.log(testBody.value[0].loc.end);
-                fs.writeFile(
-                    `${testFileName.replace(/\.js$/, '-error.js')}`,
-                    recast.prettyPrint(j.getAST()[0].value).code
-                );
-                throw err;
+            // 4. check that there's exactly one `const resp = await axios(config)` call- this is
+            //    the "request" of the test (i.e. not the pre-request script or the "test")
+            if (requestStatements.length !== 1) {
+                // `Expected exactly one instance of \`await axios\` in the scope of the setTimeout call. Found ${requestStatements.length}.`
+                // For the record, this `continue` is awful, we should filter out the data we don't
+                // want to act on. But the alternative, putting a lot of effort into code that
+                // should only run a couple of times, is probably worse. Ugh.
+                continue;
             }
             const requestStatement = requestStatements[0];
 
@@ -1569,7 +1587,16 @@ const createOrReplaceOutputDir = async (name) => {
 
 
     // TODO: transformations:
-    //  -1. Notice how `.has` is called on `jsonData.scenario1.result.message` instead of on
+    // -4. Collapse all redundant nested blocks. E.g.
+    //      it('whatever', () => {
+    //          {
+    //              // actual functionality of interest here, nested one block deeper than
+    //              // necessary
+    //          }
+    //      }
+    // -3. Evaluate all calls to 'www.google.com'- what are they _for_? Eliminate them?
+    // -2. After (-4, -3), eliminate all sleeps that have nothing after them.
+    // -1. Notice how `.has` is called on `jsonData.scenario1.result.message` instead of on
     //     `pm.expect`?:
     //       pm.expect((jsonData.scenario1.result.message).has(`Got an error response resolving party: {  errorInformation: { errorCode: '3200', errorDescription: 'Generic ID not found' }`));
     //     Fix this.
